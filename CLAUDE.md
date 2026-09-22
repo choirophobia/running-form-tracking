@@ -6,16 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Batch 1 (pose-detection PoC) and Batch 2 (fps detection + tiered gate) are done, both living in
-`src/app/pose-poc/page.tsx` — see the section below. Everything past that (metrics, Supabase,
-auth, history, recommendations) is not built yet. Read `running-form-saas-prd-v0.md` and
+Batch 1 (pose-detection PoC), Batch 2 (fps detection + tiered gate), and Batch 3 (metric
+computation functions) are done. Batches 1+2 live in `src/app/pose-poc/page.tsx`; Batch 3 lives
+in `src/lib/metrics/` and is **not yet wired into that page** — it's pure functions + unit tests
+only so far (see the sections below). Everything past that (Supabase, auth, history,
+recommendations) is not built yet. Read `running-form-saas-prd-v0.md` and
 `running-brand-design-tokens.md` in full before extending this — they are the source of truth,
 not this summary.
 
 Recommended build order (from the PRD, Section 11):
 1. Client-side pose extraction + skeleton overlay proof of concept — **done**
 2. FPS detection with the tiered confidence gate — **done**
-3. Metric computation functions, with unit tests against known reference angles
+3. Metric computation functions, with unit tests against known reference angles — **done**
+   (functions only — not yet wired into a live-capture pipeline; see below)
 4. Supabase schema + API routes
 5. Report UI using the design tokens
 6. History sidebar
@@ -28,10 +31,15 @@ Recommended build order (from the PRD, Section 11):
 - Build: `npm run build`
 - Start (prod): `npm run start`
 - Lint: `npm run lint`
+- Run all tests: `npm test`
+- Watch tests: `npm run test:watch`
+- Run one test file: `npx vitest run src/lib/metrics/metrics.test.ts`
 
 Scaffolded with `create-next-app` (App Router, TypeScript, Tailwind v4, ESLint). Next.js 16 —
 its APIs/conventions may differ from training data; see `AGENTS.md` / `node_modules/next/dist/docs/`
-before writing Next.js-specific code.
+before writing Next.js-specific code. Tests use Vitest, config in `vitest.config.mts` (the `.mts`
+extension is deliberate — a plain `.ts` config loads as CommonJS and warns, since this project
+has no top-level `"type": "module"`).
 
 ## Batch 1+2: pose detection + fps gate proof of concept
 
@@ -74,6 +82,53 @@ revert to a static `import "mediainfo.js"` without re-checking both failure mode
 Once pose extraction + fps gating are validated against a real running video, this page's logic
 becomes the basis for the real upload/analysis flow — don't build further batches on top of it
 until that validation happens.
+
+## Batch 3: metric computation functions
+
+`src/lib/metrics/` — pure functions per PRD Section 6, decoupled from any live video/UI pipeline
+on purpose (the pose-poc page doesn't collect a landmark sequence yet; that wiring is future
+work, not this batch). Import via the barrel `src/lib/metrics/index.ts`.
+
+- `geometry.ts` — generic `Vec3` math (`angleAtVertex`, `distance`, `midpoint`, `average`, …), no
+  pose domain knowledge. Unit-tested against known reference angles (30/60/90/120° cases,
+  3-4-5 triangle distance) — this is literally the "known reference angles" the PRD build note
+  asks for.
+- `pose-landmarks.ts` — `POSE_LANDMARK` index constants (BlazePose's 33-point topology, same
+  indices `PoseLandmarker.POSE_CONNECTIONS` uses for the Batch 1 overlay) and the `PoseFrame`
+  type each metric function consumes: `{ timestampMs, worldLandmarks }`, where `worldLandmarks`
+  is `PoseLandmarkerResult.worldLandmarks[0]` (real-world meters, **not** the normalized [0,1]
+  image landmarks Batch 1 draws with).
+  **Unverified assumption, flagged in that file's comments**: world-landmark +Y is assumed to
+  increase *downward* (matching MediaPipe's normalized-landmark convention). Every "higher/
+  lower" comparison across this module depends on that sign. It hasn't been checked against a
+  real captured session yet — do that before trusting these numbers on real footage, and if
+  vertical oscillation / hip drop / landing form look inverted, this is the first thing to flip.
+- `strides.ts` — footstrike detection, which cadence/overstride/hip-drop/landing-form all depend
+  on: `detectFootstrikes(frames, side)` finds local maxima of that ankle's height *relative to
+  the hip midpoint* (not raw ankle height, so it's robust to the subject/camera drifting
+  vertically in frame). `findPeaks` is a small, deliberately simple peak finder tuned for clean,
+  roughly-periodic biomechanical signals — not a general DSP peak detector.
+- `metrics.ts` — the six PRD-scoped functions (`computeCadence`, `computeVerticalOscillation`,
+  `computeOverstride`, `computeHipDrop`, `computeArmSwingSymmetry`, `computeLandingForm`) plus
+  `computeMetrics(frames, fpsTier)` which runs all six. Each returns `null` — not a misleading
+  zero — when there isn't enough signal (too few frames/footstrikes) to compute a value;
+  `computeLandingForm` also returns `null` when `fpsTier === "blocked"`, gating on the Batch 2
+  fps tier per PRD Section 5/6 (confidence is `"full"`/`"reduced"` mirroring that tier
+  otherwise). `computeHipDrop`'s doc comment repeats the PRD's own caveat that it needs
+  front/rear-angle video to be meaningful — this module has no way to detect camera angle, so
+  that constraint has to be enforced elsewhere (capture guidance in a future batch), not here.
+
+Every metric function is unit-tested (`*.test.ts` next to its source) against synthetic
+`PoseFrame` sequences built to have an exactly-derivable expected value — e.g. overstride and
+hip-drop tests hold the relevant landmarks at a *frame-invariant* offset so the expected result
+is exact regardless of which frame the peak-finder happens to pick, while cadence/vertical-
+oscillation tests use a generous tolerance since those inherently depend on discrete frame-grid
+timing. Not tested against real captured pose data yet — only synthetic fixtures — so treat the
+computed values as algorithmically-verified, not yet empirically-validated.
+
+**Explicitly out of scope for this batch** (don't add speculatively): the composite efficiency
+score (PRD Section 7's "one hero number") — its weighting formula is still an open decision per
+PRD Section 12; wiring these functions into the pose-poc page's live capture loop; persistence.
 
 ## Product & architectural constraints (do not violate)
 
