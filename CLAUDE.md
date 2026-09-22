@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Batch 1 (pose-detection proof of concept) is in progress — see the "Batch 1" section below.
-Everything past that (fps detection, metrics, Supabase, auth, history, recommendations) is not
-built yet. Read `running-form-saas-prd-v0.md` and `running-brand-design-tokens.md` in full before
-extending this — they are the source of truth, not this summary.
+Batch 1 (pose-detection PoC) and Batch 2 (fps detection + tiered gate) are done, both living in
+`src/app/pose-poc/page.tsx` — see the section below. Everything past that (metrics, Supabase,
+auth, history, recommendations) is not built yet. Read `running-form-saas-prd-v0.md` and
+`running-brand-design-tokens.md` in full before extending this — they are the source of truth,
+not this summary.
 
 Recommended build order (from the PRD, Section 11):
-1. Client-side pose extraction + skeleton overlay proof of concept — **in progress**
-2. FPS detection with the tiered confidence gate
+1. Client-side pose extraction + skeleton overlay proof of concept — **done**
+2. FPS detection with the tiered confidence gate — **done**
 3. Metric computation functions, with unit tests against known reference angles
 4. Supabase schema + API routes
 5. Report UI using the design tokens
@@ -32,22 +33,47 @@ Scaffolded with `create-next-app` (App Router, TypeScript, Tailwind v4, ESLint).
 its APIs/conventions may differ from training data; see `AGENTS.md` / `node_modules/next/dist/docs/`
 before writing Next.js-specific code.
 
-## Batch 1: pose detection proof of concept
+## Batch 1+2: pose detection + fps gate proof of concept
 
-`src/app/pose-poc/page.tsx` — a standalone page (not the final app UI) to validate that
-MediaPipe Pose Landmarker runs client-side and produces a usable skeleton overlay before any
-metrics/fps/backend work is built on top of it. Upload a local video file, it plays in a
-`<video>` element, and a `<canvas>` overlay draws landmarks/connectors per frame via
-`requestAnimationFrame` + `PoseLandmarker.detectForVideo`.
+`src/app/pose-poc/page.tsx` — a standalone page (not the final app UI), still intentionally
+unstyled (no design-tokens pass yet), no metric computation, no persistence. On file select it
+runs the Batch 2 fps gate first; only videos that pass (or are explicitly continued past) reach
+the Batch 1 pose overlay.
+
+**Batch 1 — pose overlay.** Upload a local video, it plays in a `<video>` element, and a
+`<canvas>` overlay draws landmarks/connectors per frame. The animation loop
+(`startPoseLoop`/`cancelScheduledFrame` in that file) lives at module scope, not inside the
+component — keep it there: it's imperative ref-driven code that intentionally calls
+`performance.now()` outside render, which trips React Compiler's purity lint if nested inside
+the component body. Prefers `requestVideoFrameCallback` (fires once per actual decoded frame)
+over a plain `requestAnimationFrame` loop, falling back to rAF where unsupported.
 
 Uses `@mediapipe/tasks-vision` (WASM, runs fully in-browser — no server round-trip), loading
 the model from Google's hosted CDN (`storage.googleapis.com/mediapipe-models`) at runtime, not
 bundled locally.
 
-This is intentionally throwaway/minimal: no styling per the design tokens, no fps gating, no
-metric computation, no persistence. Once pose extraction is validated against a real running
-video, this page's logic becomes the basis for the real upload/analysis flow — don't build
-further batches on top of it until that validation happens.
+**Batch 2 — fps gate.** `src/lib/fps-detection.ts` implements PRD Section 5: `detectFps(file)`
+reads the container's encoded frame rate via `mediainfo.js`, falling back to empirical frame
+counting (via `requestVideoFrameCallback` on a hidden video element) if metadata is missing,
+malformed, or outside ~15–480fps. `classifyFpsTier(fps)` sorts the result into the tiered gate
+(full ≥120fps / reduced 60–119fps / blocked <60fps). The pose-poc page wires this in as an
+`FpsGateState` that blocks the video from loading at all on a "blocked" result, offering a
+"continue without landing form" button that proceeds with `landingFormAvailable: false`.
+
+`mediainfo.js` is loaded from jsdelivr at runtime, **not** imported as an npm value import — its
+package build (via the `module`/`import` export conditions) resolves to emscripten glue that
+does `new URL('MediaInfoModule.wasm', import.meta.url)`, which Turbopack statically resolves as
+a bundled asset and fails to find, and which — separately — 404s even at the CDN, because the
+wasm binary is published only at `dist/MediaInfoModule.wasm`, not next to the `esm-bundle`/`esm`
+JS that references it via `import.meta.url`. The fix that actually works: dynamically `import()`
+the ESM bundle from a *non-literal* URL variable (so no bundler statically resolves it) and pass
+an explicit `locateFile` pointing at the correct `dist/` path. Verified end-to-end against
+generated 30fps/150fps test clips before relying on it — don't drop the `locateFile` override or
+revert to a static `import "mediainfo.js"` without re-checking both failure modes.
+
+Once pose extraction + fps gating are validated against a real running video, this page's logic
+becomes the basis for the real upload/analysis flow — don't build further batches on top of it
+until that validation happens.
 
 ## Product & architectural constraints (do not violate)
 
@@ -81,7 +107,7 @@ The browser does all pose extraction and metric computation; the API layer only 
 computed landmark/metric JSON. This split is what keeps compute cost at zero regardless of
 usage volume — don't move computation server-side without revisiting this constraint.
 
-### FPS validation (PRD Section 5, not yet built)
+### FPS validation (PRD Section 5, done — see Batch 1+2 section above)
 
 Runs client-side, before upload starts:
 1. Primary: read encoded frame rate from container metadata via `mediainfo.js` (WASM).
