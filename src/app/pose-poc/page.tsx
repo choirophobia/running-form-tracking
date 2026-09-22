@@ -8,6 +8,7 @@ import {
   type PoseLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { classifyFpsTier, detectFps, type FpsDetectionResult } from "@/lib/fps-detection";
+import { computeMetrics, type MetricsResult, type PoseFrame } from "@/lib/metrics";
 
 // Dev-only test knob, not part of the real product gate: lets this PoC page
 // be exercised end-to-end with sub-60fps footage (the "reduced confidence"
@@ -16,9 +17,10 @@ import { classifyFpsTier, detectFps, type FpsDetectionResult } from "@/lib/fps-d
 // see fps-detection.ts.
 const TEST_REDUCED_CONFIDENCE_FPS = 40;
 
-// Batch 1+2 proof-of-concept only: validates client-side MediaPipe pose
+// Batch 1+2+3 proof-of-concept only: validates client-side MediaPipe pose
 // extraction + skeleton overlay, gated by the Batch 2 fps tiered-confidence
-// check, on an uploaded video. No metrics, no persistence — see CLAUDE.md.
+// check, with Batch 3's metric computation wired in for display. No
+// persistence, no design-tokens pass yet — see CLAUDE.md.
 
 type Status =
   | { phase: "loading-model" }
@@ -58,6 +60,7 @@ interface LoopRefs {
   rafRef: RefObject<number | null>;
   vfcRef: RefObject<number | null>;
   lastVideoTimeRef: RefObject<number>;
+  framesRef: RefObject<PoseFrame[]>;
 }
 
 function cancelScheduledFrame(refs: LoopRefs) {
@@ -108,6 +111,18 @@ function startPoseLoop(refs: LoopRefs) {
       refs.lastVideoTimeRef.current = video.currentTime;
       const result = landmarker.detectForVideo(video, performance.now());
       drawResult(canvas, result);
+
+      // Batch 3 wiring: collect one PoseFrame per detected frame, keyed by
+      // the video's own playback position (not wall-clock time, which
+      // would be thrown off by processing lag) — this is what
+      // computeMetrics() below is run against once playback pauses/ends.
+      const worldLandmarks = result.worldLandmarks[0];
+      if (worldLandmarks) {
+        refs.framesRef.current.push({
+          timestampMs: video.currentTime * 1000,
+          worldLandmarks,
+        });
+      }
     }
 
     scheduleNext();
@@ -133,20 +148,24 @@ export default function PosePocPage() {
   const rafRef = useRef<number | null>(null);
   const vfcRef = useRef<number | null>(null);
   const lastVideoTimeRef = useRef(-1);
+  const framesRef = useRef<PoseFrame[]>([]);
 
   const pendingFileRef = useRef<File | null>(null);
 
   // Refs are already stable across renders — this memo just gives us one
-  // stable object to depend on instead of six separate ref values.
+  // stable object to depend on instead of seven separate ref values.
   const loopRefs = useMemo<LoopRefs>(
-    () => ({ videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef }),
-    [videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef]
+    () => ({ videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef, framesRef }),
+    [videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef, framesRef]
   );
 
   const [status, setStatus] = useState<Status>({ phase: "loading-model" });
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [fpsGate, setFpsGate] = useState<FpsGateState>({ phase: "empty" });
   const [testLowerThreshold, setTestLowerThreshold] = useState(false);
+  const [metrics, setMetrics] = useState<{ result: MetricsResult; frameCount: number } | null>(
+    null
+  );
 
   // Load the pose landmarker model once, client-side (WASM), on mount.
   useEffect(() => {
@@ -200,6 +219,8 @@ export default function PosePocPage() {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(null);
     lastVideoTimeRef.current = -1;
+    framesRef.current = [];
+    setMetrics(null);
     pendingFileRef.current = file;
     setFpsGate({ phase: "checking" });
 
@@ -257,6 +278,18 @@ export default function PosePocPage() {
   function handlePause() {
     cancelScheduledFrame(loopRefs);
     setStatus((s) => (s.phase === "error" ? s : { phase: "idle" }));
+    recomputeMetrics();
+  }
+
+  // Recomputes over every frame collected so far (across all play/pause
+  // cycles for the current video, not just the latest one) — pause partway
+  // through and you still get metrics for what's been watched.
+  function recomputeMetrics() {
+    if (fpsGate.phase !== "resolved" || framesRef.current.length === 0) return;
+    setMetrics({
+      result: computeMetrics(framesRef.current, fpsGate.result.tier),
+      frameCount: framesRef.current.length,
+    });
   }
 
   return (
@@ -265,9 +298,9 @@ export default function PosePocPage() {
         Pose landmarker proof of concept
       </h1>
       <p style={{ color: "#666", marginBottom: 16 }}>
-        Batch 1+2 only — upload a test video to check fps detection, the
-        tiered confidence gate, and pose detection/skeleton overlay before
-        anything else gets built.
+        Batch 1+2+3 — upload a test video to check fps detection, the tiered
+        confidence gate, pose detection/skeleton overlay, and the computed
+        running-form metrics, before anything else gets built.
       </p>
 
       {status.phase === "loading-model" && <p>Loading pose model…</p>}
@@ -373,6 +406,82 @@ export default function PosePocPage() {
           />
         </div>
       )}
+
+      {videoUrl && (
+        <div style={{ marginTop: 16 }}>
+          <button onClick={recomputeMetrics} style={{ marginBottom: 12 }}>
+            Recompute metrics from frames collected so far
+          </button>
+          <p style={{ fontSize: 13, color: "#666", marginBottom: 12 }}>
+            Metrics recompute automatically whenever you pause or the video
+            ends, over every frame collected across all play/pause cycles so
+            far (not just the most recent one).
+          </p>
+
+          {metrics && <MetricsPanel metrics={metrics.result} frameCount={metrics.frameCount} />}
+        </div>
+      )}
     </main>
+  );
+}
+
+function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCount: number }) {
+  return (
+    <div style={{ border: "1px solid #DAD5C6", padding: 16, maxWidth: 500 }}>
+      <p style={{ margin: 0, marginBottom: 12, fontFamily: "monospace", fontSize: 12, color: "#666" }}>
+        {frameCount} frames with a detected pose collected
+      </p>
+      <MetricRow
+        label="Cadence"
+        value={metrics.cadence ? `${metrics.cadence.stepsPerMinute.toFixed(0)} spm` : null}
+      />
+      <MetricRow
+        label="Vertical oscillation"
+        value={
+          metrics.verticalOscillation
+            ? `${metrics.verticalOscillation.oscillationCm.toFixed(1)} cm`
+            : null
+        }
+      />
+      <MetricRow
+        label="Overstride"
+        value={metrics.overstride ? `${metrics.overstride.overstrideCm.toFixed(1)} cm` : null}
+      />
+      <MetricRow
+        label="Hip drop"
+        value={metrics.hipDrop ? `${metrics.hipDrop.hipDropDegrees.toFixed(1)}°` : null}
+      />
+      <MetricRow
+        label="Arm swing symmetry"
+        value={
+          metrics.armSwingSymmetry ? `${metrics.armSwingSymmetry.symmetryScore.toFixed(0)}%` : null
+        }
+      />
+      <MetricRow
+        label="Landing form"
+        value={
+          metrics.landingForm
+            ? `${metrics.landingForm.pattern} (${metrics.landingForm.confidence} confidence)`
+            : null
+        }
+      />
+    </div>
+  );
+}
+
+function MetricRow({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        padding: "6px 0",
+        borderBottom: "1px solid #DAD5C6",
+        fontSize: 14,
+      }}
+    >
+      <span style={{ color: "#666" }}>{label}</span>
+      <span style={{ fontFamily: "monospace" }}>{value ?? "not enough data"}</span>
+    </div>
   );
 }
