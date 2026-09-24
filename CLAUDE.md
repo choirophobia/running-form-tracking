@@ -7,19 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 Batch 1 (pose-detection PoC), Batch 2 (fps detection + tiered gate), and Batch 3 (metric
-computation functions) are done. Batches 1+2 live in `src/app/pose-poc/page.tsx`; Batch 3 lives
-in `src/lib/metrics/` and is **not yet wired into that page** — it's pure functions + unit tests
-only so far (see the sections below). Everything past that (Supabase, auth, history,
-recommendations) is not built yet. Read `running-form-saas-prd-v0.md` and
+computation functions) are done and wired together in one PoC page, `src/app/pose-poc/page.tsx`.
+Batch 4 (Supabase schema + API routes) is also done — schema + backend only, **not wired into
+the pose-poc page**: computed metrics don't get saved anywhere yet, there's no sign-up/sign-in UI,
+and history/report UI (Batches 5-6) don't exist. Read `running-form-saas-prd-v0.md` and
 `running-brand-design-tokens.md` in full before extending this — they are the source of truth,
 not this summary.
 
 Recommended build order (from the PRD, Section 11):
 1. Client-side pose extraction + skeleton overlay proof of concept — **done**
 2. FPS detection with the tiered confidence gate — **done**
-3. Metric computation functions, with unit tests against known reference angles — **done**
-   (functions only — not yet wired into a live-capture pipeline; see below)
-4. Supabase schema + API routes
+3. Metric computation functions, with unit tests against known reference angles — **done**,
+   wired into the pose-poc page so computed metrics are visible against real footage
+4. Supabase schema + API routes — **done** (schema + `/api/analyses` routes only; not wired
+   into any UI yet — see the Batch 4 section below)
 5. Report UI using the design tokens
 6. History sidebar
 7. Recommendations engine with the curated citation/video table
@@ -34,19 +35,29 @@ Recommended build order (from the PRD, Section 11):
 - Run all tests: `npm test`
 - Watch tests: `npm run test:watch`
 - Run one test file: `npx vitest run src/lib/metrics/metrics.test.ts`
+- Start local Supabase (Postgres/Auth/Storage via Docker): `npx supabase start`
+- Stop it: `npx supabase stop`
+- Check its status / reprint connection details: `npx supabase status`
+- Reapply migrations from scratch: `npx supabase db reset`
 
 Scaffolded with `create-next-app` (App Router, TypeScript, Tailwind v4, ESLint). Next.js 16 —
 its APIs/conventions may differ from training data; see `AGENTS.md` / `node_modules/next/dist/docs/`
 before writing Next.js-specific code. Tests use Vitest, config in `vitest.config.mts` (the `.mts`
 extension is deliberate — a plain `.ts` config loads as CommonJS and warns, since this project
-has no top-level `"type": "module"`).
+has no top-level `"type": "module"`); it loads `.env.local` itself via `vitest.setup.ts` since
+(unlike Next) Vitest doesn't do that automatically.
 
-## Batch 1+2: pose detection + fps gate proof of concept
+`npm test` includes `src/app/api/analyses/route.supabase.test.ts`, which hits the **real** local
+Supabase instance — it throws immediately with a clear message if `npx supabase start` hasn't
+been run / `.env.local` isn't populated. Run `npx supabase start` before `npm test` if you've
+stopped it.
+
+## Batch 1+2+3: pose detection + fps gate + metrics proof of concept
 
 `src/app/pose-poc/page.tsx` — a standalone page (not the final app UI), still intentionally
-unstyled (no design-tokens pass yet), no metric computation, no persistence. On file select it
-runs the Batch 2 fps gate first; only videos that pass (or are explicitly continued past) reach
-the Batch 1 pose overlay.
+unstyled (no design-tokens pass yet), no persistence. On file select it runs the Batch 2 fps gate
+first; only videos that pass (or are explicitly continued past) reach the Batch 1 pose overlay,
+which in turn feeds the Batch 3 metrics (see below).
 
 **Batch 1 — pose overlay.** Upload a local video, it plays in a `<video>` element, and a
 `<canvas>` overlay draws landmarks/connectors per frame. The animation loop
@@ -79,15 +90,20 @@ an explicit `locateFile` pointing at the correct `dist/` path. Verified end-to-e
 generated 30fps/150fps test clips before relying on it — don't drop the `locateFile` override or
 revert to a static `import "mediainfo.js"` without re-checking both failure modes.
 
-Once pose extraction + fps gating are validated against a real running video, this page's logic
-becomes the basis for the real upload/analysis flow — don't build further batches on top of it
-until that validation happens.
+Once pose extraction, fps gating, and metrics are validated against a real running video, this
+page's logic becomes the basis for the real upload/analysis flow — don't build further batches
+on top of it until that validation happens.
 
 ## Batch 3: metric computation functions
 
-`src/lib/metrics/` — pure functions per PRD Section 6, decoupled from any live video/UI pipeline
-on purpose (the pose-poc page doesn't collect a landmark sequence yet; that wiring is future
-work, not this batch). Import via the barrel `src/lib/metrics/index.ts`.
+`src/lib/metrics/` — pure functions per PRD Section 6, importable via the barrel
+`src/lib/metrics/index.ts`. The functions themselves are framework-independent (take a
+`PoseFrame[]`, return a result), but they **are** wired into the pose-poc page: `onFrame` in that
+page's animation loop pushes one `PoseFrame` per detected frame into a ref-held buffer (keyed by
+`video.currentTime * 1000`, not wall-clock time), and `computeMetrics(frames, fpsTier)` reruns
+over everything collected so far whenever playback pauses/ends, or via a manual "Recompute
+metrics" button. Results render in a `MetricsPanel` below the video, one row per metric, showing
+"not enough data" for any `null` result rather than a misleading number.
 
 - `geometry.ts` — generic `Vec3` math (`angleAtVertex`, `distance`, `midpoint`, `average`, …), no
   pose domain knowledge. Unit-tested against known reference angles (30/60/90/120° cases,
@@ -123,12 +139,66 @@ Every metric function is unit-tested (`*.test.ts` next to its source) against sy
 hip-drop tests hold the relevant landmarks at a *frame-invariant* offset so the expected result
 is exact regardless of which frame the peak-finder happens to pick, while cadence/vertical-
 oscillation tests use a generous tolerance since those inherently depend on discrete frame-grid
-timing. Not tested against real captured pose data yet — only synthetic fixtures — so treat the
-computed values as algorithmically-verified, not yet empirically-validated.
+timing. The automated tests are still synthetic-only; the pose-poc page has been exercised
+manually in-browser against real running footage (plausible-looking numbers, nothing formally
+recorded/regression-tested) — treat the computation logic as algorithmically-verified and
+informally spot-checked, not empirically validated against a labeled reference dataset.
 
-**Explicitly out of scope for this batch** (don't add speculatively): the composite efficiency
-score (PRD Section 7's "one hero number") — its weighting formula is still an open decision per
-PRD Section 12; wiring these functions into the pose-poc page's live capture loop; persistence.
+**Explicitly out of scope so far** (don't add speculatively): the composite efficiency score
+(PRD Section 7's "one hero number") — its weighting formula is still an open decision per PRD
+Section 12; the design-tokens styling pass (Batch 5). (Persistence is no longer out of scope —
+see Batch 4 below — but isn't wired to this page yet.)
+
+## Batch 4: Supabase schema + API routes
+
+Backend only — **nothing in the UI calls any of this yet**. Runs against a **local** Supabase
+instance via Docker (`npx supabase start`), not a hosted project; that's a deliberate choice for
+this stage (see the AskUserQuestion decision in project history) — switching to a hosted project
+later just means changing `.env.local`, nothing in the code.
+
+- `supabase/migrations/20260101000000_analyses_schema.sql` — the schema from PRD Section 9's
+  sketch: `profiles` (a public companion to Supabase's built-in `auth.users`, auto-created by a
+  trigger on signup) and `analyses` (one row per report: fps, all six Batch 3 metrics, flags,
+  nullable `score` for the not-yet-built composite efficiency score). **Row Level Security is on
+  for both tables and is load-bearing, not optional** — Supabase tables are reachable directly
+  from the browser via the anon key, so RLS is the only thing stopping one user from reading or
+  writing another user's rows. Don't add a table here without also adding its RLS policy.
+- `src/lib/supabase/request-client.ts` — `requireAuthenticatedClient(request)`, used by every
+  route handler: builds a Supabase client using the **anon key plus the caller's own JWT**
+  (forwarded from the `Authorization: Bearer <token>` header), never the service-role key. This
+  means every query through it is subject to RLS exactly as if the browser had called Supabase
+  directly — route handlers never manually filter `WHERE user_id = ...`; RLS already guarantees
+  that. The service-role key (in `.env.local` as `SUPABASE_SERVICE_ROLE_KEY`) is used **only** in
+  test setup/teardown (creating/deleting test users), never in application code — keep it that
+  way; wiring it into a route handler would silently bypass RLS for that route.
+- `src/lib/supabase/analyses.ts` — `parseCreateAnalysisInput`, hand-rolled request-body
+  validation (no schema-validation library pulled in for one small fixed shape). Every field is
+  optional/nullable, matching the Batch 3 metric functions' `null` ("not enough data") results.
+- `src/app/api/analyses/route.ts` (`POST` create, `GET` list-mine) and
+  `src/app/api/analyses/[id]/route.ts` (`GET` one) — plain Web `Request`/`Response`, not
+  `NextResponse` (no need for its extras here). `user_id` on create is always the authenticated
+  caller's id, never trusted from the request body. A wrong-owner id 404s the same as a
+  nonexistent one — RLS makes those indistinguishable by design, so there's no "exists but isn't
+  yours" leak.
+
+**Two kinds of tests, don't confuse them:**
+- `src/lib/supabase/analyses.test.ts` — pure, synthetic, no live service needed (same style as
+  Batches 1-3).
+- `src/app/api/analyses/route.supabase.test.ts` — integration tests against the **real** local
+  Supabase instance: creates real throwaway auth users (via the admin/service-role client, test-
+  only), signs in, calls the actual route handler functions with real `Request` objects and real
+  bearer tokens, and — importantly — includes a cross-user isolation test that verifies RLS
+  actually stops user A from reading user B's analysis (404, not a data leak). This is the test
+  that would have caught it if RLS were misconfigured or a route bypassed it; don't remove it as
+  "redundant" with the unit tests.
+
+Also manually smoke-tested with real `curl` requests against the running dev server (not just
+the test suite) before considering this done — same verify-before-declaring-done discipline as
+Batch 2's mediainfo.js CDN bug.
+
+**Explicitly out of scope so far**: any UI (sign-up/sign-in page, saving a pose-poc session,
+history sidebar); video upload to Storage (`video_storage_path` column exists, nothing writes to
+it); the composite `score` column (same open decision as Batch 3).
 
 ## Product & architectural constraints (do not violate)
 
@@ -162,6 +232,11 @@ The browser does all pose extraction and metric computation; the API layer only 
 computed landmark/metric JSON. This split is what keeps compute cost at zero regardless of
 usage volume — don't move computation server-side without revisiting this constraint.
 
+**Current dev setup runs Supabase locally via Docker** (`npx supabase start`), not the hosted
+free-tier project the PRD describes — no hosted project exists yet. Nothing in the application
+code is local-only (env vars are the only thing that would change to point at a hosted project),
+but don't assume a hosted project exists when reasoning about deployment.
+
 ### FPS validation (PRD Section 5, done — see Batch 1+2 section above)
 
 Runs client-side, before upload starts:
@@ -175,11 +250,14 @@ Tiered gate, not hard pass/fail:
 - <60fps → upload blocked by default (explain why), with a "continue without landing form"
   option that disables only that metric
 
-### Data model (Supabase Postgres, PRD Section 9, not yet built)
+### Data model (Supabase Postgres, PRD Section 9, done — see Batch 4 section above)
+
+Implemented in `supabase/migrations/20260101000000_analyses_schema.sql` — that migration file is
+the source of truth for exact column types/constraints, not this sketch.
 
 ```
-users
-  id, email, created_at
+profiles (public companion to Supabase's built-in auth.users)
+  id (= auth.users.id), email, created_at
 
 analyses
   id, user_id (FK), recorded_at, video_fps, video_storage_path (nullable),
