@@ -124,15 +124,37 @@ metrics" button. Results render in a `MetricsPanel` below the video, one row per
   the hip midpoint* (not raw ankle height, so it's robust to the subject/camera drifting
   vertically in frame). `findPeaks` is a small, deliberately simple peak finder tuned for clean,
   roughly-periodic biomechanical signals — not a general DSP peak detector.
+- `camera-angle.ts` — infers capture angle **from the pose data itself**, since nothing upstream
+  asks the user for it. `inferCameraAngle(frames)` returns `"side" | "front-or-rear"` by checking
+  how much the two hip landmarks separate in the camera's horizontal axis relative to torso
+  height (a side-on shot collapses that separation toward zero — the anatomical left-right axis
+  points into the screen, not across it). Defaults to `"front-or-rear"` (i.e. doesn't suppress
+  hip drop) when there's too little data to tell — a false negative here is worse than an
+  occasional imprecise number. `inferDirectionOfTravelAxis` + `inferTravelSign` separately infer
+  which horizontal axis (and which way) the runner is translating along, from the hip midpoint's
+  range of motion — used to sign overstride (see below), independent of the side/front-or-rear
+  classification.
 - `metrics.ts` — the six PRD-scoped functions (`computeCadence`, `computeVerticalOscillation`,
   `computeOverstride`, `computeHipDrop`, `computeArmSwingSymmetry`, `computeLandingForm`) plus
   `computeMetrics(frames, fpsTier)` which runs all six. Each returns `null` — not a misleading
   zero — when there isn't enough signal (too few frames/footstrikes) to compute a value;
   `computeLandingForm` also returns `null` when `fpsTier === "blocked"`, gating on the Batch 2
   fps tier per PRD Section 5/6 (confidence is `"full"`/`"reduced"` mirroring that tier
-  otherwise). `computeHipDrop`'s doc comment repeats the PRD's own caveat that it needs
-  front/rear-angle video to be meaningful — this module has no way to detect camera angle, so
-  that constraint has to be enforced elsewhere (capture guidance in a future batch), not here.
+  otherwise).
+  - `computeHipDrop(frames, cameraAngle?)` now actually enforces the PRD's own caveat that it
+    needs front/rear-angle video, instead of just documenting it: it calls `inferCameraAngle`
+    (or accepts an explicit override) and returns `null` for a side-on shot, rather than the
+    plausible-looking-but-meaningless number it used to silently produce. This was a real gap,
+    not a hypothetical one — caught from testing against actual side-view footage.
+  - `computeOverstride` reports a **signed** value (`OverstrideResult.signed: boolean`) when
+    `inferDirectionOfTravelAxis` finds a clear direction of travel — positive means the foot
+    landed ahead of the center of mass in that direction (the standard meaning of
+    "overstriding"), negative means behind. Falls back to the old undirected horizontal-plane
+    magnitude (always ≥ 0, `signed: false`) when no dominant direction is found (e.g. running in
+    place, or a front/rear shot where "direction of travel across the frame" isn't meaningful).
+  - `computeMetrics`'s result now includes a top-level `cameraAngle` field — computed once and
+    reused for `hipDrop`'s gating, and surfaced so a caller (the pose-poc page's `MetricsPanel`)
+    can explain *why* hip drop is unavailable, distinct from generic "not enough data".
 
 Every metric function is unit-tested (`*.test.ts` next to its source) against synthetic
 `PoseFrame` sequences built to have an exactly-derivable expected value — e.g. overstride and
