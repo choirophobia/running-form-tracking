@@ -15,6 +15,14 @@ const FRAME_INTERVAL_MS = 1000 / 30;
 
 function neutralWorldLandmarks(): Vec3[] {
   const points: Vec3[] = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0 }));
+  // Shoulders above the hips (smaller y, under the Y-down convention) at a
+  // realistic torso-height offset — needed so inferCameraAngle's hip-
+  // separation-to-torso-height ratio reads as a plausible front/rear shot
+  // by default, not an accidental (0,0,0) degenerate torso. Tests that
+  // care about camera-angle classification specifically (or about arm
+  // swing, which overrides shoulders anyway) set their own positions.
+  points[POSE_LANDMARK.LEFT_SHOULDER] = { x: -0.1, y: -0.5, z: 0 };
+  points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: 0.1, y: -0.5, z: 0 };
   points[POSE_LANDMARK.LEFT_HIP] = { x: -0.1, y: 0, z: 0 };
   points[POSE_LANDMARK.RIGHT_HIP] = { x: 0.1, y: 0, z: 0 };
   points[POSE_LANDMARK.LEFT_ANKLE] = { x: -0.1, y: 0.9, z: 0 };
@@ -56,6 +64,16 @@ function buildStrideSession(options: {
     points[POSE_LANDMARK.LEFT_ANKLE] = { x: -0.1, y: leftY, z: 0 };
     points[POSE_LANDMARK.RIGHT_ANKLE] = { x: 0.1, y: rightY, z: 0 };
     augment?.(points, t);
+
+    // Re-derive shoulders at a realistic offset above wherever the hips
+    // ended up (a test's augment may move them) so inferCameraAngle's
+    // torso-height reference stays sane regardless of what a given test
+    // does to hip position.
+    const hipMidX = (points[POSE_LANDMARK.LEFT_HIP].x + points[POSE_LANDMARK.RIGHT_HIP].x) / 2;
+    const hipMidY = (points[POSE_LANDMARK.LEFT_HIP].y + points[POSE_LANDMARK.RIGHT_HIP].y) / 2;
+    points[POSE_LANDMARK.LEFT_SHOULDER] = { x: hipMidX - 0.1, y: hipMidY - 0.5, z: 0 };
+    points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: hipMidX + 0.1, y: hipMidY - 0.5, z: 0 };
+
     frames.push({ timestampMs: t, worldLandmarks: points });
   }
   return frames;
@@ -117,6 +135,30 @@ describe("computeOverstride", () => {
     expect(result).not.toBeNull();
     expect(result!.sampleCount).toBe(10);
     expect(result!.overstrideCm).toBeCloseTo(30, 6);
+    // No hip movement over time in this fixture -> no direction of travel
+    // to sign against -> falls back to the undirected formula.
+    expect(result!.signed).toBe(false);
+  });
+
+  it("returns a signed value when a direction of travel is inferred", () => {
+    // Hips translate steadily along x (a side-shot signature — see
+    // camera-angle.test.ts) while ankles are held 0.3m *behind* the hip
+    // in x at every frame -> the foot is landing behind the direction of
+    // travel, which should read as a negative (not just small) value,
+    // unlike the undirected fallback which can only ever be >= 0.
+    const session = buildStrideSession({
+      augment: (points, t) => {
+        const hipX = t * 0.001; // steady translation along x
+        points[POSE_LANDMARK.LEFT_HIP] = { x: hipX - 0.1, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: hipX + 0.1, y: 0, z: 0 };
+        points[POSE_LANDMARK.LEFT_ANKLE] = { ...points[POSE_LANDMARK.LEFT_ANKLE], x: hipX - 0.3, z: 0 };
+        points[POSE_LANDMARK.RIGHT_ANKLE] = { ...points[POSE_LANDMARK.RIGHT_ANKLE], x: hipX - 0.3, z: 0 };
+      },
+    });
+    const result = computeOverstride(session);
+    expect(result).not.toBeNull();
+    expect(result!.signed).toBe(true);
+    expect(result!.overstrideCm).toBeCloseTo(-30, 6);
   });
 
   it("returns null with no detected footstrikes", () => {
@@ -143,6 +185,36 @@ describe("computeHipDrop", () => {
 
   it("returns null with no detected footstrikes", () => {
     expect(computeHipDrop([])).toBeNull();
+  });
+
+  it("returns null for side-view footage instead of a misleading angle", () => {
+    // Hips collapsed onto each other in x (the side-view signature — see
+    // camera-angle.test.ts), separated in z instead. The same vertical
+    // offset that produced a real angle in the front/rear test above must
+    // now be suppressed entirely, not silently reported.
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HIP] = { x: 0, y: 0.02, z: -0.1 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0, y: 0, z: 0.1 };
+        points[POSE_LANDMARK.LEFT_SHOULDER] = { x: 0, y: -0.5, z: -0.1 };
+        points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: 0, y: -0.5, z: 0.1 };
+      },
+    });
+    expect(computeHipDrop(session)).toBeNull();
+  });
+
+  it("respects an explicitly passed camera angle over the inferred one", () => {
+    // Hip x-separation small enough to still infer as "side" (0.02m vs.
+    // ~0.5m torso height), but non-zero so the underlying angle formula
+    // still has something to compute once the gate is overridden.
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HIP] = { x: -0.01, y: 0.02, z: -0.1 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0.01, y: 0, z: 0.1 };
+      },
+    });
+    expect(computeHipDrop(session, "side")).toBeNull();
+    expect(computeHipDrop(session, "front-or-rear")).not.toBeNull();
   });
 });
 
@@ -269,10 +341,25 @@ describe("computeMetrics", () => {
     expect(result.armSwingSymmetry).not.toBeNull();
     expect(result.landingForm).not.toBeNull();
     expect(result.landingForm!.confidence).toBe("full");
+    expect(result.cameraAngle).toBe("front-or-rear");
   });
 
   it("omits landing form when the fps tier is blocked", () => {
     const session = buildStrideSession({});
     expect(computeMetrics(session, "blocked").landingForm).toBeNull();
+  });
+
+  it("omits hip drop and surfaces the inferred angle for side-view footage", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HIP] = { x: 0, y: 0.02, z: -0.1 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0, y: 0, z: 0.1 };
+      },
+    });
+    const result = computeMetrics(session, "full");
+    expect(result.cameraAngle).toBe("side");
+    expect(result.hipDrop).toBeNull();
+    // Side view doesn't affect the other metrics.
+    expect(result.cadence).not.toBeNull();
   });
 });

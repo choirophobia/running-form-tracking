@@ -428,8 +428,11 @@ export default function PosePocPage() {
 function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCount: number }) {
   return (
     <div style={{ border: "1px solid #DAD5C6", padding: 16, maxWidth: 500 }}>
-      <p style={{ margin: 0, marginBottom: 12, fontFamily: "monospace", fontSize: 12, color: "#666" }}>
+      <p style={{ margin: 0, marginBottom: 4, fontFamily: "monospace", fontSize: 12, color: "#666" }}>
         {frameCount} frames with a detected pose collected
+      </p>
+      <p style={{ margin: 0, marginBottom: 12, fontFamily: "monospace", fontSize: 12, color: "#666" }}>
+        Camera angle detected: {metrics.cameraAngle}
       </p>
       <MetricRow
         label="Cadence"
@@ -445,11 +448,25 @@ function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCo
       />
       <MetricRow
         label="Overstride"
-        value={metrics.overstride ? `${metrics.overstride.overstrideCm.toFixed(1)} cm` : null}
+        value={
+          metrics.overstride
+            ? metrics.overstride.signed
+              ? `${Math.abs(metrics.overstride.overstrideCm).toFixed(1)} cm ${
+                  metrics.overstride.overstrideCm >= 0 ? "ahead of" : "behind"
+                } center of mass`
+              : `${metrics.overstride.overstrideCm.toFixed(1)} cm (undirected — no clear travel direction)`
+            : null
+        }
       />
       <MetricRow
         label="Hip drop"
-        value={metrics.hipDrop ? `${metrics.hipDrop.hipDropDegrees.toFixed(1)}°` : null}
+        value={
+          metrics.hipDrop
+            ? `${metrics.hipDrop.hipDropDegrees.toFixed(1)}°`
+            : metrics.cameraAngle === "side"
+              ? "not available — needs a front/rear camera angle, not side"
+              : null
+        }
       />
       <MetricRow
         label="Arm swing symmetry"

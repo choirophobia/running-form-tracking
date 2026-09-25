@@ -1,4 +1,10 @@
 import type { FpsTier } from "../fps-detection";
+import {
+  inferCameraAngle,
+  inferDirectionOfTravelAxis,
+  inferTravelSign,
+  type CameraAngleGuess,
+} from "./camera-angle";
 import { angleAtVertex, average, magnitude, midpoint } from "./geometry";
 import { landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
 import { detectAllFootstrikes } from "./strides";
@@ -65,26 +71,54 @@ export function computeVerticalOscillation(frames: PoseFrame[]): VerticalOscilla
 export interface OverstrideResult {
   overstrideCm: number;
   sampleCount: number;
+  /** true when a dominant direction of travel was inferred (see
+   * camera-angle.ts) and overstrideCm is therefore signed — positive
+   * means the foot landed ahead of the center of mass in the direction of
+   * travel (the usual meaning of "overstriding"), negative means behind.
+   * false means no dominant direction was found and overstrideCm falls
+   * back to an undirected horizontal-plane distance (always >= 0). */
+  signed: boolean;
 }
 
-/** Horizontal-plane distance between the striking foot's ankle and the
- * hip midpoint (center-of-mass proxy) at each footstrike, averaged — per
- * PRD: "Foot-strike position vs. center of mass". Excludes the vertical
- * axis so this measures how far ahead/behind the body the foot lands,
- * not how high the hip is above the ankle. */
+/**
+ * Distance between the striking foot's ankle and the hip midpoint
+ * (center-of-mass proxy) at each footstrike, averaged — per PRD:
+ * "Foot-strike position vs. center of mass". Excludes the vertical axis
+ * so this measures how far ahead/behind the body the foot lands, not how
+ * high the hip is above the ankle.
+ *
+ * When a clear direction of travel can be inferred (typical of a side-on
+ * shot — see inferDirectionOfTravelAxis), this reports a *signed* value
+ * projected onto that axis, matching the usual biomechanical meaning of
+ * overstride (ahead of center of mass = positive). Without one — e.g. a
+ * front/rear shot, or running in place — it falls back to an undirected
+ * horizontal-plane distance, which can't distinguish "ahead" from
+ * "behind" or "to the side".
+ */
 export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null {
   const strikes = detectAllFootstrikes(frames);
   if (strikes.length === 0) return null;
+
+  const travelAxis = inferDirectionOfTravelAxis(frames);
+  const travelSign = travelAxis ? inferTravelSign(frames, travelAxis) : null;
 
   const distances = strikes.map((strike) => {
     const f = frames[strike.frameIndex];
     const ankleIndex = strike.side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
     const ankle = landmark(f, ankleIndex);
     const hipCenter = midpoint(landmark(f, POSE_LANDMARK.LEFT_HIP), landmark(f, POSE_LANDMARK.RIGHT_HIP));
+
+    if (travelAxis && travelSign) {
+      return (ankle[travelAxis] - hipCenter[travelAxis]) * travelSign;
+    }
     return magnitude({ x: ankle.x - hipCenter.x, y: 0, z: ankle.z - hipCenter.z });
   });
 
-  return { overstrideCm: average(distances) * METERS_TO_CM, sampleCount: distances.length };
+  return {
+    overstrideCm: average(distances) * METERS_TO_CM,
+    sampleCount: distances.length,
+    signed: travelAxis !== null,
+  };
 }
 
 export interface HipDropResult {
@@ -98,11 +132,20 @@ export interface HipDropResult {
  *
  * PRD note: this metric "requires front/rear-angle video" — from a
  * side-on shot the two hip landmarks nearly overlap in the visible plane
- * and this angle isn't meaningful. This function doesn't detect camera
- * angle itself; that constraint has to be enforced by capture guidance,
- * not this computation.
+ * and this angle isn't meaningful. Rather than silently returning a
+ * meaningless number for side-on footage, this infers the camera angle
+ * from the pose data itself (see camera-angle.ts's `inferCameraAngle`)
+ * and returns null when it looks like a side shot. That inference is a
+ * heuristic, not a certainty — pass `cameraAngle` explicitly if a future
+ * capture step (e.g. asking the user, or checking device orientation
+ * metadata) can determine it more reliably.
  */
-export function computeHipDrop(frames: PoseFrame[]): HipDropResult | null {
+export function computeHipDrop(
+  frames: PoseFrame[],
+  cameraAngle: CameraAngleGuess = inferCameraAngle(frames)
+): HipDropResult | null {
+  if (cameraAngle === "side") return null;
+
   const strikes = detectAllFootstrikes(frames);
   if (strikes.length === 0) return null;
 
@@ -223,18 +266,24 @@ export interface MetricsResult {
   hipDrop: HipDropResult | null;
   armSwingSymmetry: ArmSwingSymmetryResult | null;
   landingForm: LandingFormResult | null;
+  /** The inferred camera angle (see camera-angle.ts) — surfaced so a
+   * caller can explain *why* hipDrop is null (side-view footage) rather
+   * than lumping it in with "not enough data". */
+  cameraAngle: CameraAngleGuess;
 }
 
 /** Computes every Batch 3 metric in one call — matches the "analyses"
  * table's field groupings in CLAUDE.md's data model sketch, though nothing
  * here persists anything (that's Batch 4). */
 export function computeMetrics(frames: PoseFrame[], fpsTier: FpsTier): MetricsResult {
+  const cameraAngle = inferCameraAngle(frames);
   return {
     cadence: computeCadence(frames),
     verticalOscillation: computeVerticalOscillation(frames),
     overstride: computeOverstride(frames),
-    hipDrop: computeHipDrop(frames),
+    hipDrop: computeHipDrop(frames, cameraAngle),
     armSwingSymmetry: computeArmSwingSymmetry(frames),
     landingForm: computeLandingForm(frames, fpsTier),
+    cameraAngle,
   };
 }
