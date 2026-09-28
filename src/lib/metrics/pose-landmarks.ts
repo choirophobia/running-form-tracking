@@ -23,6 +23,19 @@ export const POSE_LANDMARK = {
   RIGHT_FOOT_INDEX: 32,
 } as const;
 
+/**
+ * A world landmark plus MediaPipe's own confidence signal for it.
+ * `visibility` (0-1, from `PoseLandmarkerResult.worldLandmarks`) is
+ * MediaPipe's estimate of whether that point is actually visible (not
+ * occluded) in the frame — genuinely useful for a side-on shot, where the
+ * far-side arm/leg is frequently partly hidden behind the body. Optional
+ * because synthetic test fixtures generally don't set it (see `isVisible`
+ * below for how an absent value is treated).
+ */
+export interface PoseLandmark extends Vec3 {
+  visibility?: number;
+}
+
 export interface PoseFrame {
   /**
    * Timestamp in ms, relative to the video's own playback position (e.g.
@@ -46,16 +59,33 @@ export interface PoseFrame {
    * sign. If computed metrics look inverted once run against real
    * footage (Batch 5+), this is the first thing to check.
    */
-  worldLandmarks: Vec3[];
+  worldLandmarks: PoseLandmark[];
 }
 
 /** Looks up a landmark by index, throwing if the frame doesn't have it — a
  * caller bug (an incomplete frame should never have been pushed) rather
  * than something to silently tolerate. */
-export function landmark(frame: PoseFrame, index: number): Vec3 {
+export function landmark(frame: PoseFrame, index: number): PoseLandmark {
   const point = frame.worldLandmarks[index];
   if (!point) {
     throw new Error(`Pose frame at ${frame.timestampMs}ms is missing landmark index ${index}`);
   }
   return point;
+}
+
+/** Below this MediaPipe visibility score, treat a landmark as too
+ * unreliable to sample from — common for the far-side limb on a side-on
+ * shot, where it's frequently partly occluded by the torso. */
+export const MIN_LANDMARK_VISIBILITY = 0.5;
+
+/** A landmark with no `visibility` value at all (e.g. most synthetic test
+ * fixtures) is treated as fully trusted — only an explicit low score
+ * excludes it. */
+export function isVisible(point: PoseLandmark, threshold = MIN_LANDMARK_VISIBILITY): boolean {
+  return point.visibility === undefined || point.visibility >= threshold;
+}
+
+/** True only if every given landmark individually passes `isVisible`. */
+export function allVisible(points: PoseLandmark[], threshold = MIN_LANDMARK_VISIBILITY): boolean {
+  return points.every((point) => isVisible(point, threshold));
 }

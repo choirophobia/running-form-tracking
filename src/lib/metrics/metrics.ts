@@ -6,7 +6,7 @@ import {
   type CameraAngleGuess,
 } from "./camera-angle";
 import { angleAtVertex, average, magnitude, midpoint } from "./geometry";
-import { landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
+import { allVisible, landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
 import { detectAllFootstrikes } from "./strides";
 
 // Batch 3: pure metric-computation functions per PRD Section 6. Each takes
@@ -94,6 +94,11 @@ export interface OverstrideResult {
  * front/rear shot, or running in place — it falls back to an undirected
  * horizontal-plane distance, which can't distinguish "ahead" from
  * "behind" or "to the side".
+ *
+ * Strikes where the striking ankle or either hip landmark has low
+ * MediaPipe visibility (commonly the trailing leg, partly hidden behind
+ * the body on a side-on shot) are skipped rather than sampled from noisy
+ * data — see pose-landmarks.ts's `isVisible`.
  */
 export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null {
   const strikes = detectAllFootstrikes(frames);
@@ -102,17 +107,23 @@ export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null 
   const travelAxis = inferDirectionOfTravelAxis(frames);
   const travelSign = travelAxis ? inferTravelSign(frames, travelAxis) : null;
 
-  const distances = strikes.map((strike) => {
+  const distances: number[] = [];
+  for (const strike of strikes) {
     const f = frames[strike.frameIndex];
     const ankleIndex = strike.side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
     const ankle = landmark(f, ankleIndex);
-    const hipCenter = midpoint(landmark(f, POSE_LANDMARK.LEFT_HIP), landmark(f, POSE_LANDMARK.RIGHT_HIP));
+    const leftHip = landmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = landmark(f, POSE_LANDMARK.RIGHT_HIP);
+    if (!allVisible([ankle, leftHip, rightHip])) continue;
 
+    const hipCenter = midpoint(leftHip, rightHip);
     if (travelAxis && travelSign) {
-      return (ankle[travelAxis] - hipCenter[travelAxis]) * travelSign;
+      distances.push((ankle[travelAxis] - hipCenter[travelAxis]) * travelSign);
+    } else {
+      distances.push(magnitude({ x: ankle.x - hipCenter.x, y: 0, z: ankle.z - hipCenter.z }));
     }
-    return magnitude({ x: ankle.x - hipCenter.x, y: 0, z: ankle.z - hipCenter.z });
-  });
+  }
+  if (distances.length === 0) return null;
 
   return {
     overstrideCm: average(distances) * METERS_TO_CM,
@@ -154,6 +165,7 @@ export function computeHipDrop(
     const f = frames[strike.frameIndex];
     const leftHip = landmark(f, POSE_LANDMARK.LEFT_HIP);
     const rightHip = landmark(f, POSE_LANDMARK.RIGHT_HIP);
+    if (!allVisible([leftHip, rightHip])) continue;
     const verticalDelta = Math.abs(leftHip.y - rightHip.y);
     const horizontalDelta = Math.abs(leftHip.x - rightHip.x);
     if (horizontalDelta === 0) continue;
@@ -169,24 +181,44 @@ export interface ArmSwingSymmetryResult {
   symmetryScore: number;
   leftRangeOfMotionDegrees: number;
   rightRangeOfMotionDegrees: number;
+  leftSampleCount: number;
+  rightSampleCount: number;
 }
 
-/** Compares each arm's elbow-angle range of motion across the whole clip
+/**
+ * Compares each arm's elbow-angle range of motion across the whole clip
  * (PRD: "Shoulder/elbow angle tracking") — not a per-stride metric, since
  * arm swing symmetry is about overall left/right balance, not a single
- * cycle. */
+ * cycle.
+ *
+ * Each arm's frames are filtered independently for landmark visibility —
+ * on a side-on shot the far arm is frequently partly hidden behind the
+ * torso for stretches of the clip, and a momentarily-occluded frame could
+ * otherwise corrupt that arm's min/max range with a garbage reading. One
+ * arm's occlusion never affects the other's sample set.
+ */
 export function computeArmSwingSymmetry(frames: PoseFrame[]): ArmSwingSymmetryResult | null {
   if (frames.length < 2) return null;
 
-  const elbowAngle = (f: PoseFrame, side: "left" | "right") =>
-    angleAtVertex(
-      landmark(f, side === "left" ? POSE_LANDMARK.LEFT_SHOULDER : POSE_LANDMARK.RIGHT_SHOULDER),
-      landmark(f, side === "left" ? POSE_LANDMARK.LEFT_ELBOW : POSE_LANDMARK.RIGHT_ELBOW),
-      landmark(f, side === "left" ? POSE_LANDMARK.LEFT_WRIST : POSE_LANDMARK.RIGHT_WRIST)
-    );
+  const anglesFor = (side: "left" | "right"): number[] => {
+    const shoulderIndex = side === "left" ? POSE_LANDMARK.LEFT_SHOULDER : POSE_LANDMARK.RIGHT_SHOULDER;
+    const elbowIndex = side === "left" ? POSE_LANDMARK.LEFT_ELBOW : POSE_LANDMARK.RIGHT_ELBOW;
+    const wristIndex = side === "left" ? POSE_LANDMARK.LEFT_WRIST : POSE_LANDMARK.RIGHT_WRIST;
 
-  const leftAngles = frames.map((f) => elbowAngle(f, "left"));
-  const rightAngles = frames.map((f) => elbowAngle(f, "right"));
+    const angles: number[] = [];
+    for (const f of frames) {
+      const shoulder = landmark(f, shoulderIndex);
+      const elbow = landmark(f, elbowIndex);
+      const wrist = landmark(f, wristIndex);
+      if (!allVisible([shoulder, elbow, wrist])) continue;
+      angles.push(angleAtVertex(shoulder, elbow, wrist));
+    }
+    return angles;
+  };
+
+  const leftAngles = anglesFor("left");
+  const rightAngles = anglesFor("right");
+  if (leftAngles.length === 0 || rightAngles.length === 0) return null;
 
   const leftRom = Math.max(...leftAngles) - Math.min(...leftAngles);
   const rightRom = Math.max(...rightAngles) - Math.min(...rightAngles);
@@ -198,6 +230,8 @@ export function computeArmSwingSymmetry(frames: PoseFrame[]): ArmSwingSymmetryRe
     symmetryScore,
     leftRangeOfMotionDegrees: leftRom,
     rightRangeOfMotionDegrees: rightRom,
+    leftSampleCount: leftAngles.length,
+    rightSampleCount: rightAngles.length,
   };
 }
 
@@ -221,6 +255,11 @@ const HEEL_TOE_THRESHOLD_M = 0.01;
  * Batch 2 fps tier (PRD Section 5/6): unavailable when blocked (<60fps),
  * since reliably catching the strike-instant frame needs it; confidence
  * is "reduced" at the 60-119fps tier and "full" at ≥120fps.
+ *
+ * Strikes where the heel or toe landmark has low visibility are skipped —
+ * exactly the frame that matters most for this metric (the instant of
+ * ground contact) is also a common moment for the foot to be partly
+ * obscured by the other leg.
  */
 export function computeLandingForm(frames: PoseFrame[], fpsTier: FpsTier): LandingFormResult | null {
   if (fpsTier === "blocked") return null;
@@ -228,15 +267,21 @@ export function computeLandingForm(frames: PoseFrame[], fpsTier: FpsTier): Landi
   const strikes = detectAllFootstrikes(frames);
   if (strikes.length === 0) return null;
 
-  const patterns: FootStrikePattern[] = strikes.map((strike) => {
+  const patterns: FootStrikePattern[] = [];
+  for (const strike of strikes) {
     const f = frames[strike.frameIndex];
     const heelIndex = strike.side === "left" ? POSE_LANDMARK.LEFT_HEEL : POSE_LANDMARK.RIGHT_HEEL;
     const toeIndex = strike.side === "left" ? POSE_LANDMARK.LEFT_FOOT_INDEX : POSE_LANDMARK.RIGHT_FOOT_INDEX;
-    const delta = landmark(f, heelIndex).y - landmark(f, toeIndex).y; // Y-down: larger = lower
-    if (delta > HEEL_TOE_THRESHOLD_M) return "heel";
-    if (delta < -HEEL_TOE_THRESHOLD_M) return "forefoot";
-    return "midfoot";
-  });
+    const heel = landmark(f, heelIndex);
+    const toe = landmark(f, toeIndex);
+    if (!allVisible([heel, toe])) continue;
+
+    const delta = heel.y - toe.y; // Y-down: larger = lower
+    if (delta > HEEL_TOE_THRESHOLD_M) patterns.push("heel");
+    else if (delta < -HEEL_TOE_THRESHOLD_M) patterns.push("forefoot");
+    else patterns.push("midfoot");
+  }
+  if (patterns.length === 0) return null;
 
   return {
     pattern: mostCommon(patterns),

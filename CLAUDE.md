@@ -155,6 +155,17 @@ metrics" button. Results render in a `MetricsPanel` below the video, one row per
   - `computeMetrics`'s result now includes a top-level `cameraAngle` field — computed once and
     reused for `hipDrop`'s gating, and surfaced so a caller (the pose-poc page's `MetricsPanel`)
     can explain *why* hip drop is unavailable, distinct from generic "not enough data".
+  - Every per-strike/per-frame sample in `computeOverstride`, `computeHipDrop`,
+    `computeLandingForm`, and `computeArmSwingSymmetry` is now filtered by MediaPipe's own
+    landmark `visibility` score (see `pose-landmarks.ts`'s `isVisible`/`allVisible`,
+    `PoseLandmark.visibility`) — a sample is skipped, not trusted, when the landmarks it needs
+    are below `MIN_LANDMARK_VISIBILITY` (0.5). This matters most on a side-on shot, where the
+    trailing/far-side limb is frequently partly hidden behind the body for stretches of the
+    clip. `computeArmSwingSymmetry` filters each arm independently (`leftSampleCount` /
+    `rightSampleCount` in its result) — one arm being occluded never corrupts the other's range
+    of motion. A landmark with no `visibility` field at all (true of most synthetic test
+    fixtures) is treated as fully trusted, so this is purely additive: it only ever excludes
+    data, never invents it.
 
 Every metric function is unit-tested (`*.test.ts` next to its source) against synthetic
 `PoseFrame` sequences built to have an exactly-derivable expected value — e.g. overstride and

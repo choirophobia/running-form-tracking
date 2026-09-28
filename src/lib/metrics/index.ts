@@ -1,5 +1,13 @@
 export type { Vec3 } from "./geometry";
-export { POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
+export {
+  allVisible,
+  isVisible,
+  landmark,
+  MIN_LANDMARK_VISIBILITY,
+  POSE_LANDMARK,
+  type PoseFrame,
+  type PoseLandmark,
+} from "./pose-landmarks";
 export {
   inferCameraAngle,
   inferDirectionOfTravelAxis,
