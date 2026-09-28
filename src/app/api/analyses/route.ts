@@ -1,4 +1,4 @@
-import { parseCreateAnalysisInput } from "@/lib/supabase/analyses";
+import { parseCreateAnalysisInput, parsePaginationParams } from "@/lib/supabase/analyses";
 import { requireAuthenticatedClient } from "@/lib/supabase/request-client";
 
 // Batch 4: POST saves one computed analysis for the caller; GET lists the
@@ -42,14 +42,29 @@ export async function GET(request: Request) {
   const auth = await requireAuthenticatedClient(request);
   if (auth instanceof Response) return auth;
 
+  const pagination = parsePaginationParams(new URL(request.url).searchParams);
+  if ("error" in pagination) {
+    return Response.json({ error: pagination.error }, { status: 400 });
+  }
+  const { limit, offset } = pagination;
+
+  // Fetch one extra row to know whether there's a next page, without a
+  // separate count query.
   const { data, error } = await auth.client
     .from("analyses")
     .select()
-    .order("recorded_at", { ascending: false });
+    .order("recorded_at", { ascending: false })
+    .range(offset, offset + limit);
 
   if (error) {
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  return Response.json({ analyses: data });
+  const hasMore = data.length > limit;
+  return Response.json({
+    analyses: hasMore ? data.slice(0, limit) : data,
+    limit,
+    offset,
+    hasMore,
+  });
 }
