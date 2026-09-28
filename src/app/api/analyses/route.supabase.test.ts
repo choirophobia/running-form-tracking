@@ -112,6 +112,17 @@ describe("POST /api/analyses", () => {
     );
     expect(response.status).toBe(400);
   });
+
+  it("rejects a physically-impossible value instead of persisting it", async () => {
+    const response = await createAnalysis(
+      authedRequest("http://localhost/api/analyses", accessToken, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cadence: -50 }),
+      })
+    );
+    expect(response.status).toBe(400);
+  });
 });
 
 describe("GET /api/analyses", () => {
@@ -130,6 +141,57 @@ describe("GET /api/analyses", () => {
     expect(Array.isArray(body.analyses)).toBe(true);
     expect(body.analyses.length).toBeGreaterThan(0);
     expect(body.analyses.every((a: { user_id: string }) => a.user_id === userId)).toBe(true);
+  });
+
+  it("paginates with limit/offset and reports hasMore correctly", async () => {
+    // A dedicated user so this test's count isn't polluted by analyses
+    // other tests in this file create for the shared user above.
+    const paginationUser = await createSignedInUser("batch4-test-pagination");
+    usersToClean.push(paginationUser.userId);
+
+    for (const cadence of [150, 160, 170, 180, 190]) {
+      await createAnalysis(
+        authedRequest("http://localhost/api/analyses", paginationUser.accessToken, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cadence }),
+        })
+      );
+    }
+
+    const page1 = await listAnalyses(
+      authedRequest("http://localhost/api/analyses?limit=2", paginationUser.accessToken)
+    );
+    const page1Body = await page1.json();
+    expect(page1Body.analyses).toHaveLength(2);
+    expect(page1Body.limit).toBe(2);
+    expect(page1Body.offset).toBe(0);
+    expect(page1Body.hasMore).toBe(true);
+
+    const page3 = await listAnalyses(
+      authedRequest("http://localhost/api/analyses?limit=2&offset=4", paginationUser.accessToken)
+    );
+    const page3Body = await page3.json();
+    expect(page3Body.analyses).toHaveLength(1);
+    expect(page3Body.hasMore).toBe(false);
+
+    // Pages don't overlap or skip: collecting every page's ids should
+    // equal the full set with no duplicates.
+    const page2 = await listAnalyses(
+      authedRequest("http://localhost/api/analyses?limit=2&offset=2", paginationUser.accessToken)
+    );
+    const page2Body = await page2.json();
+    const allIds = [...page1Body.analyses, ...page2Body.analyses, ...page3Body.analyses].map(
+      (a: { id: string }) => a.id
+    );
+    expect(new Set(allIds).size).toBe(5);
+  });
+
+  it("rejects an out-of-range limit", async () => {
+    const response = await listAnalyses(
+      authedRequest("http://localhost/api/analyses?limit=1000", accessToken)
+    );
+    expect(response.status).toBe(400);
   });
 });
 

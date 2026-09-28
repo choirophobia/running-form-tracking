@@ -196,12 +196,19 @@ later just means changing `.env.local`, nothing in the code.
 - `src/lib/supabase/analyses.ts` — `parseCreateAnalysisInput`, hand-rolled request-body
   validation (no schema-validation library pulled in for one small fixed shape). Every field is
   optional/nullable, matching the Batch 3 metric functions' `null` ("not enough data") results.
+  Numeric fields are also bounds-checked against physically-plausible ranges (`NUMBER_FIELD_BOUNDS`
+  — e.g. cadence 1-400 spm, hip_drop 0-90°) so obviously-corrupt values get rejected with a 400
+  instead of silently persisted; `score` is deliberately left unbounded since its scale isn't
+  decided yet (PRD Section 12). Also exports `parsePaginationParams` (see below).
 - `src/app/api/analyses/route.ts` (`POST` create, `GET` list-mine) and
   `src/app/api/analyses/[id]/route.ts` (`GET` one) — plain Web `Request`/`Response`, not
   `NextResponse` (no need for its extras here). `user_id` on create is always the authenticated
   caller's id, never trusted from the request body. A wrong-owner id 404s the same as a
   nonexistent one — RLS makes those indistinguishable by design, so there's no "exists but isn't
-  yours" leak.
+  yours" leak. `GET` (list) takes `?limit=&offset=` (default limit 20, max 100 — the query had no
+  limit at all originally, fine while every user has a handful of rows, not once someone has a
+  real history) and returns `{ analyses, limit, offset, hasMore }`; fetches `limit + 1` rows to
+  compute `hasMore` without a separate count query.
 
 **Two kinds of tests, don't confuse them:**
 - `src/lib/supabase/analyses.test.ts` — pure, synthetic, no live service needed (same style as

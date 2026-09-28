@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCreateAnalysisInput } from "./analyses";
+import { DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, parseCreateAnalysisInput, parsePaginationParams } from "./analyses";
 
 describe("parseCreateAnalysisInput", () => {
   it("accepts a fully populated valid body", () => {
@@ -66,5 +66,99 @@ describe("parseCreateAnalysisInput", () => {
   it("ignores unknown fields rather than rejecting them", () => {
     const result = parseCreateAnalysisInput({ cadence: 170, unknown_field: "whatever" });
     expect(result).toEqual({ cadence: 170 });
+  });
+
+  it("rejects physically-impossible values instead of silently persisting them", () => {
+    expect(parseCreateAnalysisInput({ cadence: -5 })).toEqual({
+      error: '"cadence" must be between 1 and 400 (got -5).',
+    });
+    expect(parseCreateAnalysisInput({ cadence: 5000 })).toEqual({
+      error: '"cadence" must be between 1 and 400 (got 5000).',
+    });
+    expect(parseCreateAnalysisInput({ hip_drop: 91 })).toEqual({
+      error: '"hip_drop" must be between 0 and 90 (got 91).',
+    });
+    expect(parseCreateAnalysisInput({ arm_swing_symmetry: 101 })).toEqual({
+      error: '"arm_swing_symmetry" must be between 0 and 100 (got 101).',
+    });
+    expect(parseCreateAnalysisInput({ video_fps: 0 })).toEqual({
+      error: '"video_fps" must be between 0.1 and 1000 (got 0).',
+    });
+  });
+
+  it("accepts a signed overstride value within its symmetric bound", () => {
+    expect(parseCreateAnalysisInput({ overstride: -15.3 })).toEqual({ overstride: -15.3 });
+  });
+
+  it("leaves the unbounded score field alone (its scale isn't decided yet)", () => {
+    expect(parseCreateAnalysisInput({ score: 99999 })).toEqual({ score: 99999 });
+  });
+
+  it("still allows null even for fields with numeric bounds", () => {
+    expect(parseCreateAnalysisInput({ cadence: null, hip_drop: null })).toEqual({
+      cadence: null,
+      hip_drop: null,
+    });
+  });
+});
+
+describe("parsePaginationParams", () => {
+  it("defaults to the standard limit and zero offset with no query params", () => {
+    expect(parsePaginationParams(new URLSearchParams())).toEqual({
+      limit: DEFAULT_LIST_LIMIT,
+      offset: 0,
+    });
+  });
+
+  it("accepts explicit valid limit and offset", () => {
+    expect(parsePaginationParams(new URLSearchParams("limit=10&offset=20"))).toEqual({
+      limit: 10,
+      offset: 20,
+    });
+  });
+
+  it("accepts the maximum allowed limit", () => {
+    expect(parsePaginationParams(new URLSearchParams(`limit=${MAX_LIST_LIMIT}`))).toEqual({
+      limit: MAX_LIST_LIMIT,
+      offset: 0,
+    });
+  });
+
+  it("rejects a limit above the maximum instead of returning everything", () => {
+    const result = parsePaginationParams(new URLSearchParams(`limit=${MAX_LIST_LIMIT + 1}`));
+    expect(result).toEqual({
+      error: `"limit" must be an integer between 1 and ${MAX_LIST_LIMIT}.`,
+    });
+  });
+
+  it("rejects a zero or negative limit", () => {
+    expect(parsePaginationParams(new URLSearchParams("limit=0"))).toEqual({
+      error: `"limit" must be an integer between 1 and ${MAX_LIST_LIMIT}.`,
+    });
+    expect(parsePaginationParams(new URLSearchParams("limit=-5"))).toEqual({
+      error: `"limit" must be an integer between 1 and ${MAX_LIST_LIMIT}.`,
+    });
+  });
+
+  it("rejects a non-integer limit", () => {
+    expect(parsePaginationParams(new URLSearchParams("limit=10.5"))).toEqual({
+      error: `"limit" must be an integer between 1 and ${MAX_LIST_LIMIT}.`,
+    });
+    expect(parsePaginationParams(new URLSearchParams("limit=abc"))).toEqual({
+      error: `"limit" must be an integer between 1 and ${MAX_LIST_LIMIT}.`,
+    });
+  });
+
+  it("rejects a negative offset", () => {
+    expect(parsePaginationParams(new URLSearchParams("offset=-1"))).toEqual({
+      error: '"offset" must be a non-negative integer.',
+    });
+  });
+
+  it("accepts a zero offset explicitly", () => {
+    expect(parsePaginationParams(new URLSearchParams("offset=0"))).toEqual({
+      limit: DEFAULT_LIST_LIMIT,
+      offset: 0,
+    });
   });
 });
