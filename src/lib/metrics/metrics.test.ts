@@ -8,13 +8,13 @@ import {
   computeOverstride,
   computeVerticalOscillation,
 } from "./metrics";
-import { POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
+import { POSE_LANDMARK, type PoseFrame, type PoseLandmark } from "./pose-landmarks";
 import type { Vec3 } from "./geometry";
 
 const FRAME_INTERVAL_MS = 1000 / 30;
 
-function neutralWorldLandmarks(): Vec3[] {
-  const points: Vec3[] = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0 }));
+function neutralWorldLandmarks(): PoseLandmark[] {
+  const points: PoseLandmark[] = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0 }));
   // Shoulders above the hips (smaller y, under the Y-down convention) at a
   // realistic torso-height offset — needed so inferCameraAngle's hip-
   // separation-to-torso-height ratio reads as a plausible front/rear shot
@@ -46,7 +46,7 @@ function buildStrideSession(options: {
   periodMs?: number;
   leftPhaseMs?: number;
   rightPhaseMs?: number;
-  augment?: (points: Vec3[], t: number) => void;
+  augment?: (points: PoseLandmark[], t: number) => void;
 }): PoseFrame[] {
   const {
     durationMs = 3000,
@@ -164,6 +164,18 @@ describe("computeOverstride", () => {
   it("returns null with no detected footstrikes", () => {
     expect(computeOverstride([])).toBeNull();
   });
+
+  it("excludes strikes where the ankle has low visibility", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_ANKLE] = { ...points[POSE_LANDMARK.LEFT_ANKLE], x: 0.3, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_ANKLE] = { ...points[POSE_LANDMARK.RIGHT_ANKLE], x: 0.3, z: 0, visibility: 0.1 };
+      },
+    });
+    // Every strike's ankle is below the visibility threshold -> nothing
+    // left to sample from, same as "no detected footstrikes".
+    expect(computeOverstride(session)).toBeNull();
+  });
 });
 
 describe("computeHipDrop", () => {
@@ -216,6 +228,16 @@ describe("computeHipDrop", () => {
     expect(computeHipDrop(session, "side")).toBeNull();
     expect(computeHipDrop(session, "front-or-rear")).not.toBeNull();
   });
+
+  it("excludes strikes where a hip landmark has low visibility", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HIP] = { x: -0.1, y: 0.02, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0.1, y: 0, z: 0 };
+      },
+    });
+    expect(computeHipDrop(session)).toBeNull();
+  });
 });
 
 describe("computeArmSwingSymmetry", () => {
@@ -251,6 +273,8 @@ describe("computeArmSwingSymmetry", () => {
     expect(result!.leftRangeOfMotionDegrees).toBeCloseTo(90, 6);
     expect(result!.rightRangeOfMotionDegrees).toBeCloseTo(60, 6);
     expect(result!.symmetryScore).toBeCloseTo(100 * (1 - 30 / 90), 6);
+    expect(result!.leftSampleCount).toBe(2);
+    expect(result!.rightSampleCount).toBe(2);
   });
 
   it("returns 100 (perfectly symmetric) when both arms don't move", () => {
@@ -270,6 +294,64 @@ describe("computeArmSwingSymmetry", () => {
 
   it("returns null with fewer than two frames", () => {
     expect(computeArmSwingSymmetry([])).toBeNull();
+  });
+
+  it("returns null when one arm is entirely low-visibility", () => {
+    const points = neutralWorldLandmarks();
+    points[POSE_LANDMARK.LEFT_SHOULDER] = { x: 0, y: 0, z: 0, visibility: 0.1 };
+    points[POSE_LANDMARK.LEFT_ELBOW] = { x: 1, y: 0, z: 0, visibility: 0.1 };
+    points[POSE_LANDMARK.LEFT_WRIST] = { x: 2, y: 0, z: 0, visibility: 0.1 };
+    points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: 0, y: 0, z: 0 };
+    points[POSE_LANDMARK.RIGHT_ELBOW] = { x: -1, y: 0, z: 0 };
+    points[POSE_LANDMARK.RIGHT_WRIST] = { x: -2, y: 0, z: 0 };
+    const frames = [
+      { timestampMs: 0, worldLandmarks: points },
+      { timestampMs: FRAME_INTERVAL_MS, worldLandmarks: points },
+    ];
+    // The right arm alone has a full valid sample set, but with no left
+    // data at all there's nothing to compare it against.
+    expect(computeArmSwingSymmetry(frames)).toBeNull();
+  });
+
+  it("excludes only the low-visibility frames, one arm at a time", () => {
+    const visibleFrame: PoseFrame = {
+      timestampMs: 0,
+      worldLandmarks: (() => {
+        const points = neutralWorldLandmarks();
+        points[POSE_LANDMARK.LEFT_SHOULDER] = { x: 0, y: 0, z: 0 };
+        points[POSE_LANDMARK.LEFT_ELBOW] = { x: 1, y: 0, z: 0 };
+        points[POSE_LANDMARK.LEFT_WRIST] = { x: 2, y: 0, z: 0 }; // 180deg (straight)
+        points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: 0, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_ELBOW] = { x: -1, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_WRIST] = { x: -2, y: 0, z: 0 }; // 180deg (straight)
+        return points;
+      })(),
+    };
+    const leftOccludedFrame: PoseFrame = {
+      timestampMs: FRAME_INTERVAL_MS,
+      worldLandmarks: (() => {
+        const points = neutralWorldLandmarks();
+        // Left arm bent to 90deg but marked low-visibility -> should not
+        // count toward the left arm's range of motion.
+        points[POSE_LANDMARK.LEFT_SHOULDER] = { x: 0, y: 0, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.LEFT_ELBOW] = { x: 1, y: 0, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.LEFT_WRIST] = { x: 1, y: 1, z: 0, visibility: 0.1 };
+        // Right arm bent to 90deg and fully visible -> counts normally.
+        points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: 0, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_ELBOW] = { x: -1, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_WRIST] = { x: -1, y: 1, z: 0 };
+        return points;
+      })(),
+    };
+
+    const result = computeArmSwingSymmetry([visibleFrame, leftOccludedFrame]);
+    expect(result).not.toBeNull();
+    // Left only ever got one valid (unoccluded) sample -> zero range.
+    expect(result!.leftSampleCount).toBe(1);
+    expect(result!.leftRangeOfMotionDegrees).toBe(0);
+    // Right got both samples -> a real range (180 -> 90 = 90deg).
+    expect(result!.rightSampleCount).toBe(2);
+    expect(result!.rightRangeOfMotionDegrees).toBeCloseTo(90, 6);
   });
 });
 
@@ -320,6 +402,18 @@ describe("computeLandingForm", () => {
       },
     });
     expect(computeLandingForm(session, "full")?.pattern).toBe("midfoot");
+  });
+
+  it("excludes strikes where the heel or toe has low visibility", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HEEL] = { x: -0.1, y: 0.95, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.LEFT_FOOT_INDEX] = { x: -0.1, y: 0.9, z: 0.1, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_HEEL] = { x: 0.1, y: 0.95, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_FOOT_INDEX] = { x: 0.1, y: 0.9, z: 0.1, visibility: 0.1 };
+      },
+    });
+    expect(computeLandingForm(session, "full")).toBeNull();
   });
 });
 
