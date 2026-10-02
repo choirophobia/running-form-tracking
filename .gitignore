@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# locally-installed AI skill content (e.g. `npx ui-ux-pro-max-cli init`) —
+# third-party tooling, not this project's source; rerun the installer to
+# get it back rather than committing it.
+/.claude/skills/
