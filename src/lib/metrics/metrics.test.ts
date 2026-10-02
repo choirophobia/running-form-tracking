@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   computeArmSwingSymmetry,
   computeCadence,
+  computeFlightTime,
+  computeGroundContactTime,
   computeHipDrop,
   computeLandingForm,
   computeMetrics,
@@ -118,6 +120,31 @@ describe("computeVerticalOscillation", () => {
   it("returns null with fewer than two footstrikes", () => {
     expect(computeVerticalOscillation([])).toBeNull();
   });
+
+  it("normalizes against estimated leg length", () => {
+    // Ankles held 10m out on x (dominates hip-to-ankle distance, so leg
+    // length stays close to a known ~10m regardless of the small y
+    // oscillations from both hip and ankle) while hips still oscillate
+    // with the same known 6cm amplitude as the test above.
+    const session = buildStrideSession({
+      augment: (points, t) => {
+        const hipY = 1.0 + 0.03 * Math.cos((2 * Math.PI * t) / 300);
+        points[POSE_LANDMARK.LEFT_HIP] = { x: 0, y: hipY, z: 0 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0, y: hipY, z: 0 };
+        points[POSE_LANDMARK.LEFT_ANKLE] = { ...points[POSE_LANDMARK.LEFT_ANKLE], x: 10, z: 0 };
+        points[POSE_LANDMARK.RIGHT_ANKLE] = { ...points[POSE_LANDMARK.RIGHT_ANKLE], x: 10, z: 0 };
+      },
+    });
+    const result = computeVerticalOscillation(session);
+    expect(result).not.toBeNull();
+    expect(result!.oscillationCm).toBeGreaterThan(5.5);
+    expect(result!.oscillationCm).toBeLessThan(6.5);
+    // Leg length ~10m -> 1000cm, so percent should sit close to
+    // oscillationCm / 1000 * 100 = oscillationCm / 10 (~0.6%).
+    expect(result!.oscillationPercentLegLength).not.toBeNull();
+    expect(result!.oscillationPercentLegLength!).toBeGreaterThan(0.5);
+    expect(result!.oscillationPercentLegLength!).toBeLessThan(0.7);
+  });
 });
 
 describe("computeOverstride", () => {
@@ -163,6 +190,27 @@ describe("computeOverstride", () => {
 
   it("returns null with no detected footstrikes", () => {
     expect(computeOverstride([])).toBeNull();
+  });
+
+  it("normalizes against estimated leg length", () => {
+    // Hip fixed at the origin, ankle held 10m out on x (so leg length
+    // stays close to a known ~10m, dominated by that horizontal offset)
+    // while overstrideCm itself is still exactly 10m = 1000cm.
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HIP] = { x: 0, y: 0, z: 0 };
+        points[POSE_LANDMARK.RIGHT_HIP] = { x: 0, y: 0, z: 0 };
+        points[POSE_LANDMARK.LEFT_ANKLE] = { ...points[POSE_LANDMARK.LEFT_ANKLE], x: 10, z: 0 };
+        points[POSE_LANDMARK.RIGHT_ANKLE] = { ...points[POSE_LANDMARK.RIGHT_ANKLE], x: 10, z: 0 };
+      },
+    });
+    const result = computeOverstride(session);
+    expect(result).not.toBeNull();
+    expect(result!.overstrideCm).toBeCloseTo(1000, 0);
+    // Leg length ~10m -> overstride ~= leg length -> percent close to 100%.
+    expect(result!.overstridePercentLegLength).not.toBeNull();
+    expect(result!.overstridePercentLegLength!).toBeGreaterThan(95);
+    expect(result!.overstridePercentLegLength!).toBeLessThan(105);
   });
 
   it("excludes strikes where the ankle has low visibility", () => {
@@ -417,8 +465,81 @@ describe("computeLandingForm", () => {
   });
 });
 
+// Matches strides.ts's DEFAULT_TOE_OFF_DROP_RATIO — for a cosine ankle-
+// height signal, the drop-ratio crossing happens at a theta with
+// cos(theta) = 1 - 2*dropRatio, independent of amplitude/offset (see
+// strides.test.ts for the full derivation this mirrors).
+const TOE_OFF_DROP_RATIO = 0.3;
+function expectedToeOffOffsetMs(periodMs: number): number {
+  const theta = Math.acos(1 - 2 * TOE_OFF_DROP_RATIO);
+  return (theta * periodMs) / (2 * Math.PI);
+}
+
+describe("computeGroundContactTime", () => {
+  const periodMs = 600;
+  const session = buildStrideSession({ durationMs: 3000, periodMs, leftPhaseMs: 150, rightPhaseMs: 450 });
+
+  it("matches the theoretical footstrike-to-toe-off offset", () => {
+    const result = computeGroundContactTime(session, "full");
+    expect(result).not.toBeNull();
+    expect(result!.sampleCount).toBe(10);
+    expect(result!.confidence).toBe("full");
+
+    const expectedMs = expectedToeOffOffsetMs(periodMs);
+    expect(result!.groundContactMs).toBeGreaterThan(expectedMs - 50);
+    expect(result!.groundContactMs).toBeLessThan(expectedMs + 50);
+  });
+
+  it("mirrors the fps tier's confidence when not blocked", () => {
+    expect(computeGroundContactTime(session, "reduced")!.confidence).toBe("reduced");
+  });
+
+  it("returns null at the blocked fps tier regardless of data", () => {
+    expect(computeGroundContactTime(session, "blocked")).toBeNull();
+  });
+
+  it("excludes strides where the ankle has low visibility", () => {
+    const lowVisSession = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_ANKLE] = { ...points[POSE_LANDMARK.LEFT_ANKLE], visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_ANKLE] = { ...points[POSE_LANDMARK.RIGHT_ANKLE], visibility: 0.1 };
+      },
+    });
+    expect(computeGroundContactTime(lowVisSession, "full")).toBeNull();
+  });
+
+  it("returns null with no detected strides", () => {
+    expect(computeGroundContactTime([], "full")).toBeNull();
+  });
+});
+
+describe("computeFlightTime", () => {
+  const periodMs = 600;
+  const session = buildStrideSession({ durationMs: 3000, periodMs, leftPhaseMs: 150, rightPhaseMs: 450 });
+
+  it("matches the theoretical toe-off-to-next-footstrike offset", () => {
+    const result = computeFlightTime(session, "full");
+    expect(result).not.toBeNull();
+    expect(result!.confidence).toBe("full");
+
+    // Combined footstrike stream alternates every half period; flight
+    // time is whatever's left of that half period after ground contact.
+    const expectedMs = periodMs / 2 - expectedToeOffOffsetMs(periodMs);
+    expect(result!.flightMs).toBeGreaterThan(expectedMs - 50);
+    expect(result!.flightMs).toBeLessThan(expectedMs + 50);
+  });
+
+  it("returns null at the blocked fps tier regardless of data", () => {
+    expect(computeFlightTime(session, "blocked")).toBeNull();
+  });
+
+  it("returns null with no detected strides", () => {
+    expect(computeFlightTime([], "full")).toBeNull();
+  });
+});
+
 describe("computeMetrics", () => {
-  it("computes all six metrics together for a full synthetic session", () => {
+  it("computes every metric together for a full synthetic session", () => {
     const session = buildStrideSession({
       augment: (points, t) => {
         const hipY = 1.0 + 0.03 * Math.cos((2 * Math.PI * t) / 300);
@@ -435,12 +556,18 @@ describe("computeMetrics", () => {
     expect(result.armSwingSymmetry).not.toBeNull();
     expect(result.landingForm).not.toBeNull();
     expect(result.landingForm!.confidence).toBe("full");
+    expect(result.groundContactTime).not.toBeNull();
+    expect(result.groundContactTime!.confidence).toBe("full");
+    expect(result.flightTime).not.toBeNull();
     expect(result.cameraAngle).toBe("front-or-rear");
   });
 
-  it("omits landing form when the fps tier is blocked", () => {
+  it("omits landing form, ground contact time, and flight time when the fps tier is blocked", () => {
     const session = buildStrideSession({});
-    expect(computeMetrics(session, "blocked").landingForm).toBeNull();
+    const result = computeMetrics(session, "blocked");
+    expect(result.landingForm).toBeNull();
+    expect(result.groundContactTime).toBeNull();
+    expect(result.flightTime).toBeNull();
   });
 
   it("omits hip drop and surfaces the inferred angle for side-view footage", () => {
