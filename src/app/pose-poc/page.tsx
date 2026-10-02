@@ -442,7 +442,10 @@ function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCo
         label="Vertical oscillation"
         value={
           metrics.verticalOscillation
-            ? `${metrics.verticalOscillation.oscillationCm.toFixed(1)} cm`
+            ? `${metrics.verticalOscillation.oscillationCm.toFixed(1)} cm` +
+              (metrics.verticalOscillation.oscillationPercentLegLength !== null
+                ? ` (${metrics.verticalOscillation.oscillationPercentLegLength.toFixed(1)}% of leg length)`
+                : "")
             : null
         }
       />
@@ -450,11 +453,14 @@ function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCo
         label="Overstride"
         value={
           metrics.overstride
-            ? metrics.overstride.signed
-              ? `${Math.abs(metrics.overstride.overstrideCm).toFixed(1)} cm ${
-                  metrics.overstride.overstrideCm >= 0 ? "ahead of" : "behind"
-                } center of mass`
-              : `${metrics.overstride.overstrideCm.toFixed(1)} cm (undirected — no clear travel direction)`
+            ? (metrics.overstride.signed
+                ? `${Math.abs(metrics.overstride.overstrideCm).toFixed(1)} cm ${
+                    metrics.overstride.overstrideCm >= 0 ? "ahead of" : "behind"
+                  } center of mass`
+                : `${metrics.overstride.overstrideCm.toFixed(1)} cm (undirected — no clear travel direction)`) +
+              (metrics.overstride.overstridePercentLegLength !== null
+                ? ` — ${metrics.overstride.overstridePercentLegLength.toFixed(1)}% of leg length`
+                : "")
             : null
         }
       />
@@ -479,6 +485,22 @@ function MetricsPanel({ metrics, frameCount }: { metrics: MetricsResult; frameCo
         value={
           metrics.landingForm
             ? `${metrics.landingForm.pattern} (${metrics.landingForm.confidence} confidence)`
+            : null
+        }
+      />
+      <MetricRow
+        label="Ground contact time"
+        value={
+          metrics.groundContactTime
+            ? `${metrics.groundContactTime.groundContactMs.toFixed(0)} ms (${metrics.groundContactTime.confidence} confidence)`
+            : null
+        }
+      />
+      <MetricRow
+        label="Flight time"
+        value={
+          metrics.flightTime
+            ? `${metrics.flightTime.flightMs.toFixed(0)} ms (${metrics.flightTime.confidence} confidence)`
             : null
         }
       />

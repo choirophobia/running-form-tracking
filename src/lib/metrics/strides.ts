@@ -72,6 +72,18 @@ function averageFrameIntervalMs(frames: PoseFrame[]): number {
   return totalMs / (frames.length - 1);
 }
 
+/** One foot's ankle height *relative to the hip midpoint* per frame — the
+ * signal both footstrike and toe-off detection are built on. Shared so the
+ * two stay in lockstep by construction. */
+function ankleRelativeHeight(frames: PoseFrame[], side: "left" | "right"): number[] {
+  const ankleIndex = side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
+  return frames.map((f) => {
+    const hipMidY =
+      (landmark(f, POSE_LANDMARK.LEFT_HIP).y + landmark(f, POSE_LANDMARK.RIGHT_HIP).y) / 2;
+    return landmark(f, ankleIndex).y - hipMidY;
+  });
+}
+
 export interface DetectFootstrikesOptions {
   smoothingWindow?: number;
   minSeparationMs?: number;
@@ -93,14 +105,7 @@ export function detectFootstrikes(
 ): FootstrikeEvent[] {
   if (frames.length < 3) return [];
 
-  const ankleIndex = side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
-
-  const relativeHeight = frames.map((f) => {
-    const hipMidY =
-      (landmark(f, POSE_LANDMARK.LEFT_HIP).y + landmark(f, POSE_LANDMARK.RIGHT_HIP).y) / 2;
-    return landmark(f, ankleIndex).y - hipMidY;
-  });
-
+  const relativeHeight = ankleRelativeHeight(frames, side);
   const smoothed = smooth(relativeHeight, options.smoothingWindow ?? DEFAULT_SMOOTHING_WINDOW);
 
   const avgIntervalMs = averageFrameIntervalMs(frames);
@@ -125,5 +130,91 @@ export function detectAllFootstrikes(
 ): FootstrikeEvent[] {
   const left = detectFootstrikes(frames, "left", options);
   const right = detectFootstrikes(frames, "right", options);
+  return [...left, ...right].sort((a, b) => a.timestampMs - b.timestampMs);
+}
+
+export interface StrideEvent extends FootstrikeEvent {
+  /** Frame index where the foot lifts off following this footstrike — the
+   * ground-contact-time/flight-time event pair. Null if it couldn't be
+   * determined (e.g. the clip ends before a clear liftoff is visible). */
+  toeOffFrameIndex: number | null;
+  toeOffTimestampMs: number | null;
+}
+
+// Below this fraction of the way from the stance "plateau" down to the
+// swing-phase trough, treat the foot as having lifted off. Scaled to each
+// stride's own amplitude rather than a fixed absolute value, same spirit
+// as findPeaks' prominenceRatio.
+const DEFAULT_TOE_OFF_DROP_RATIO = 0.3;
+
+/**
+ * Finds the toe-off frame following one footstrike: scans forward from the
+ * footstrike (searching only up to `searchEndIndex`, normally the next
+ * footstrike on the same foot) for the first point the ankle-relative-
+ * height signal drops below `dropRatio` of the way toward this window's
+ * lowest point — a simple, PoC-grade heuristic for "the foot started
+ * lifting off," not a biomechanically precise contact-force-based
+ * detector.
+ */
+function findToeOffFrameIndex(
+  relativeHeight: number[],
+  footstrikeIndex: number,
+  searchEndIndex: number,
+  dropRatio: number
+): number | null {
+  // Defensive: findPeaks only ever returns interior indices (it requires a
+  // following sample to compare against), so footstrikeIndex from
+  // detectFootstrikes is always followed by at least one frame in
+  // practice. Guards against a future change to that constraint rather
+  // than a reachable case today.
+  if (searchEndIndex - footstrikeIndex < 2) return null;
+
+  const stanceValue = relativeHeight[footstrikeIndex];
+  const windowValues = relativeHeight.slice(footstrikeIndex, searchEndIndex);
+  const troughValue = Math.min(...windowValues);
+  const threshold = stanceValue - (stanceValue - troughValue) * dropRatio;
+
+  for (let i = footstrikeIndex + 1; i < searchEndIndex; i++) {
+    if (relativeHeight[i] < threshold) return i;
+  }
+  return null;
+}
+
+/** Footstrike + toe-off pairs for one foot — see `detectFootstrikes` for
+ * the footstrike side of this, which this builds on unchanged. */
+export function detectStrides(
+  frames: PoseFrame[],
+  side: "left" | "right",
+  options: DetectFootstrikesOptions & { toeOffDropRatio?: number } = {}
+): StrideEvent[] {
+  const footstrikes = detectFootstrikes(frames, side, options);
+  if (footstrikes.length === 0) return [];
+
+  const relativeHeight = ankleRelativeHeight(frames, side);
+  const dropRatio = options.toeOffDropRatio ?? DEFAULT_TOE_OFF_DROP_RATIO;
+
+  return footstrikes.map((strike, i) => {
+    const searchEndIndex = footstrikes[i + 1]?.frameIndex ?? frames.length;
+    const toeOffFrameIndex = findToeOffFrameIndex(
+      relativeHeight,
+      strike.frameIndex,
+      searchEndIndex,
+      dropRatio
+    );
+    return {
+      ...strike,
+      toeOffFrameIndex,
+      toeOffTimestampMs: toeOffFrameIndex !== null ? frames[toeOffFrameIndex].timestampMs : null,
+    };
+  });
+}
+
+/** Stride events for both feet, combined and sorted chronologically. */
+export function detectAllStrides(
+  frames: PoseFrame[],
+  options: DetectFootstrikesOptions & { toeOffDropRatio?: number } = {}
+): StrideEvent[] {
+  const left = detectStrides(frames, "left", options);
+  const right = detectStrides(frames, "right", options);
   return [...left, ...right].sort((a, b) => a.timestampMs - b.timestampMs);
 }

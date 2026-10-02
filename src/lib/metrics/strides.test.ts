@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectAllFootstrikes, detectFootstrikes, findPeaks } from "./strides";
+import { detectAllFootstrikes, detectAllStrides, detectFootstrikes, detectStrides, findPeaks } from "./strides";
 import { POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
 import type { Vec3 } from "./geometry";
 
@@ -126,5 +126,61 @@ describe("detectAllFootstrikes", () => {
     for (let i = 1; i < all.length; i++) {
       expect(all[i].side).not.toBe(all[i - 1].side);
     }
+  });
+});
+
+describe("detectStrides", () => {
+  const DROP_RATIO = 0.3; // matches DEFAULT_TOE_OFF_DROP_RATIO
+
+  // For a cosine ankle-height signal, the drop-ratio threshold crossing
+  // happens at a theta with cos(theta) = 1 - 2*dropRatio (amplitude and any
+  // constant offset both cancel out of the ratio) — this is the "known
+  // reference" the toe-off detector is checked against, same spirit as the
+  // footstrike tests above.
+  function expectedToeOffOffsetMs(periodMs: number): number {
+    const theta = Math.acos(1 - 2 * DROP_RATIO);
+    return (theta * periodMs) / (2 * Math.PI);
+  }
+
+  it("finds a toe-off after each footstrike near the theoretical crossing point", () => {
+    const periodMs = 600;
+    const session = buildSyntheticStrideSession({
+      durationMs: 3000,
+      periodMs,
+      leftPhaseMs: 150,
+      rightPhaseMs: 450,
+    });
+    const strides = detectStrides(session, "left");
+    expect(strides.length).toBeGreaterThan(0);
+
+    const expectedOffsetMs = expectedToeOffOffsetMs(periodMs);
+    for (const stride of strides) {
+      expect(stride.toeOffFrameIndex).not.toBeNull();
+      const actualOffsetMs = stride.toeOffTimestampMs! - stride.timestampMs;
+      expect(actualOffsetMs).toBeGreaterThan(expectedOffsetMs - TIMESTAMP_TOLERANCE_MS);
+      expect(actualOffsetMs).toBeLessThan(expectedOffsetMs + TIMESTAMP_TOLERANCE_MS);
+    }
+  });
+
+  it("returns an empty array with no detected footstrikes", () => {
+    expect(detectStrides([], "left")).toEqual([]);
+  });
+});
+
+describe("detectAllStrides", () => {
+  it("merges both feet in chronological order, each with a toe-off", () => {
+    const session = buildSyntheticStrideSession({
+      durationMs: 3000,
+      periodMs: 600,
+      leftPhaseMs: 150,
+      rightPhaseMs: 450,
+    });
+    const all = detectAllStrides(session);
+
+    expect(all).toHaveLength(10);
+    for (let i = 1; i < all.length; i++) {
+      expect(all[i].timestampMs).toBeGreaterThanOrEqual(all[i - 1].timestampMs);
+    }
+    expect(all.every((s) => s.toeOffFrameIndex !== null)).toBe(true);
   });
 });

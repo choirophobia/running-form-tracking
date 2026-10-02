@@ -5,9 +5,9 @@ import {
   inferTravelSign,
   type CameraAngleGuess,
 } from "./camera-angle";
-import { angleAtVertex, average, magnitude, midpoint } from "./geometry";
+import { angleAtVertex, average, distance, magnitude, midpoint } from "./geometry";
 import { allVisible, landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
-import { detectAllFootstrikes } from "./strides";
+import { detectAllFootstrikes, detectAllStrides } from "./strides";
 
 // Batch 3: pure metric-computation functions per PRD Section 6. Each takes
 // a sequence of already-detected PoseFrames (see pose-landmarks.ts) and
@@ -16,6 +16,32 @@ import { detectAllFootstrikes } from "./strides";
 // (a future report UI) should treat null as "not enough data", not zero.
 
 const METERS_TO_CM = 100;
+
+/**
+ * Estimates anatomical leg length (meters) from hip-to-ankle distance,
+ * taking the *maximum* observed across the clip rather than an average —
+ * a bent knee always shortens the projected hip-ankle distance, so the
+ * longest observed reading is the closest proxy for true leg length (full
+ * extension). Used to normalize metrics like overstride and vertical
+ * oscillation as a fraction of the runner's own size instead of raw cm,
+ * so two runners with identical *relative* form don't get different-
+ * looking numbers just because one is taller.
+ *
+ * Returns null if no hip/ankle pair was ever visible enough to sample.
+ */
+function estimateLegLengthMeters(frames: PoseFrame[]): number | null {
+  const distances: number[] = [];
+  for (const f of frames) {
+    const leftHip = landmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = landmark(f, POSE_LANDMARK.RIGHT_HIP);
+    const leftAnkle = landmark(f, POSE_LANDMARK.LEFT_ANKLE);
+    const rightAnkle = landmark(f, POSE_LANDMARK.RIGHT_ANKLE);
+    if (allVisible([leftHip, leftAnkle])) distances.push(distance(leftHip, leftAnkle));
+    if (allVisible([rightHip, rightAnkle])) distances.push(distance(rightHip, rightAnkle));
+  }
+  if (distances.length === 0) return null;
+  return Math.max(...distances);
+}
 
 export interface CadenceResult {
   /** Combined (both feet) steps per minute — the standard running-cadence
@@ -41,6 +67,12 @@ export function computeCadence(frames: PoseFrame[]): CadenceResult | null {
 export interface VerticalOscillationResult {
   oscillationCm: number;
   sampleCount: number;
+  /** oscillationCm as a percentage of estimated leg length, or null if leg
+   * length couldn't be estimated — a taller runner naturally has a larger
+   * absolute oscillationCm for identical relative form, so this is the
+   * more comparable number across different runners. See
+   * estimateLegLengthMeters. */
+  oscillationPercentLegLength: number | null;
 }
 
 /** Hip-midpoint bounce per stride cycle (PRD: "Hip landmark bounce"),
@@ -65,7 +97,14 @@ export function computeVerticalOscillation(frames: PoseFrame[]): VerticalOscilla
   }
   if (amplitudes.length === 0) return null;
 
-  return { oscillationCm: average(amplitudes) * METERS_TO_CM, sampleCount: amplitudes.length };
+  const oscillationCm = average(amplitudes) * METERS_TO_CM;
+  const legLengthM = estimateLegLengthMeters(frames);
+
+  return {
+    oscillationCm,
+    sampleCount: amplitudes.length,
+    oscillationPercentLegLength: legLengthM ? (oscillationCm / METERS_TO_CM / legLengthM) * 100 : null,
+  };
 }
 
 export interface OverstrideResult {
@@ -78,6 +117,11 @@ export interface OverstrideResult {
    * false means no dominant direction was found and overstrideCm falls
    * back to an undirected horizontal-plane distance (always >= 0). */
   signed: boolean;
+  /** overstrideCm as a percentage of estimated leg length, or null if leg
+   * length couldn't be estimated. Keeps the sign of overstrideCm — see
+   * estimateLegLengthMeters for why this is the more comparable number
+   * across runners of different heights. */
+  overstridePercentLegLength: number | null;
 }
 
 /**
@@ -125,10 +169,14 @@ export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null 
   }
   if (distances.length === 0) return null;
 
+  const overstrideCm = average(distances) * METERS_TO_CM;
+  const legLengthM = estimateLegLengthMeters(frames);
+
   return {
-    overstrideCm: average(distances) * METERS_TO_CM,
+    overstrideCm,
     sampleCount: distances.length,
     signed: travelAxis !== null,
+    overstridePercentLegLength: legLengthM ? (overstrideCm / METERS_TO_CM / legLengthM) * 100 : null,
   };
 }
 
@@ -290,6 +338,88 @@ export function computeLandingForm(frames: PoseFrame[], fpsTier: FpsTier): Landi
   };
 }
 
+export interface GroundContactTimeResult {
+  groundContactMs: number;
+  confidence: LandingFormConfidence;
+  sampleCount: number;
+}
+
+/**
+ * Time from footstrike to toe-off, averaged across every stride with a
+ * detected toe-off (see strides.ts's `detectAllStrides`). Gated by the
+ * Batch 2 fps tier the same way `computeLandingForm` is: unavailable when
+ * blocked (<60fps) — accurately timing ground contact needs the same
+ * frame-rate headroom as catching the exact strike-instant frame does.
+ *
+ * Strides where either the footstrike or toe-off frame's ankle/hip
+ * landmarks have low visibility are excluded.
+ */
+export function computeGroundContactTime(
+  frames: PoseFrame[],
+  fpsTier: FpsTier
+): GroundContactTimeResult | null {
+  if (fpsTier === "blocked") return null;
+
+  const strides = detectAllStrides(frames);
+  const durations: number[] = [];
+  for (const stride of strides) {
+    if (stride.toeOffTimestampMs === null) continue;
+    const ankleIndex =
+      stride.side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
+    const strikeAnkle = landmark(frames[stride.frameIndex], ankleIndex);
+    const toeOffAnkle = landmark(frames[stride.toeOffFrameIndex!], ankleIndex);
+    if (!allVisible([strikeAnkle, toeOffAnkle])) continue;
+
+    durations.push(stride.toeOffTimestampMs - stride.timestampMs);
+  }
+  if (durations.length === 0) return null;
+
+  return {
+    groundContactMs: average(durations),
+    confidence: fpsTier === "full" ? "full" : "reduced",
+    sampleCount: durations.length,
+  };
+}
+
+export interface FlightTimeResult {
+  flightMs: number;
+  confidence: LandingFormConfidence;
+  sampleCount: number;
+}
+
+/**
+ * Time from one foot's toe-off to the *next* footstrike (either foot) —
+ * the brief airborne phase between strides that's the main thing
+ * distinguishing running from walking. Same fps gating as
+ * `computeGroundContactTime` and the same reasoning.
+ */
+export function computeFlightTime(frames: PoseFrame[], fpsTier: FpsTier): FlightTimeResult | null {
+  if (fpsTier === "blocked") return null;
+
+  const strides = detectAllStrides(frames);
+  const allFootstrikeTimestamps = strides.map((s) => s.timestampMs).sort((a, b) => a - b);
+
+  const durations: number[] = [];
+  for (const stride of strides) {
+    if (stride.toeOffTimestampMs === null) continue;
+    const ankleIndex =
+      stride.side === "left" ? POSE_LANDMARK.LEFT_ANKLE : POSE_LANDMARK.RIGHT_ANKLE;
+    const toeOffAnkle = landmark(frames[stride.toeOffFrameIndex!], ankleIndex);
+    if (!allVisible([toeOffAnkle])) continue;
+
+    const nextFootstrikeMs = allFootstrikeTimestamps.find((t) => t > stride.toeOffTimestampMs!);
+    if (nextFootstrikeMs === undefined) continue;
+    durations.push(nextFootstrikeMs - stride.toeOffTimestampMs);
+  }
+  if (durations.length === 0) return null;
+
+  return {
+    flightMs: average(durations),
+    confidence: fpsTier === "full" ? "full" : "reduced",
+    sampleCount: durations.length,
+  };
+}
+
 function mostCommon<T extends string>(items: T[]): T {
   const counts = new Map<T, number>();
   for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1);
@@ -311,15 +441,17 @@ export interface MetricsResult {
   hipDrop: HipDropResult | null;
   armSwingSymmetry: ArmSwingSymmetryResult | null;
   landingForm: LandingFormResult | null;
+  groundContactTime: GroundContactTimeResult | null;
+  flightTime: FlightTimeResult | null;
   /** The inferred camera angle (see camera-angle.ts) — surfaced so a
    * caller can explain *why* hipDrop is null (side-view footage) rather
    * than lumping it in with "not enough data". */
   cameraAngle: CameraAngleGuess;
 }
 
-/** Computes every Batch 3 metric in one call — matches the "analyses"
- * table's field groupings in CLAUDE.md's data model sketch, though nothing
- * here persists anything (that's Batch 4). */
+/** Computes every metric in one call — matches the "analyses" table's
+ * field groupings in CLAUDE.md's data model sketch, though nothing here
+ * persists anything (that's Batch 4). */
 export function computeMetrics(frames: PoseFrame[], fpsTier: FpsTier): MetricsResult {
   const cameraAngle = inferCameraAngle(frames);
   return {
@@ -329,6 +461,8 @@ export function computeMetrics(frames: PoseFrame[], fpsTier: FpsTier): MetricsRe
     hipDrop: computeHipDrop(frames, cameraAngle),
     armSwingSymmetry: computeArmSwingSymmetry(frames),
     landingForm: computeLandingForm(frames, fpsTier),
+    groundContactTime: computeGroundContactTime(frames, fpsTier),
+    flightTime: computeFlightTime(frames, fpsTier),
     cameraAngle,
   };
 }

@@ -15,7 +15,14 @@ export {
   type CameraAngleGuess,
   type TravelAxis,
 } from "./camera-angle";
-export { detectAllFootstrikes, detectFootstrikes, type FootstrikeEvent } from "./strides";
+export {
+  detectAllFootstrikes,
+  detectAllStrides,
+  detectFootstrikes,
+  detectStrides,
+  type FootstrikeEvent,
+  type StrideEvent,
+} from "./strides";
 export {
   computeMetrics,
   computeCadence,
@@ -24,6 +31,8 @@ export {
   computeHipDrop,
   computeArmSwingSymmetry,
   computeLandingForm,
+  computeGroundContactTime,
+  computeFlightTime,
   type MetricsResult,
   type CadenceResult,
   type VerticalOscillationResult,
@@ -33,4 +42,6 @@ export {
   type LandingFormResult,
   type FootStrikePattern,
   type LandingFormConfidence,
+  type GroundContactTimeResult,
+  type FlightTimeResult,
 } from "./metrics";

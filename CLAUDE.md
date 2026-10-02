@@ -135,12 +135,15 @@ metrics" button. Results render in a `MetricsPanel` below the video, one row per
   range of motion — used to sign overstride (see below), independent of the side/front-or-rear
   classification.
 - `metrics.ts` — the six PRD-scoped functions (`computeCadence`, `computeVerticalOscillation`,
-  `computeOverstride`, `computeHipDrop`, `computeArmSwingSymmetry`, `computeLandingForm`) plus
-  `computeMetrics(frames, fpsTier)` which runs all six. Each returns `null` — not a misleading
-  zero — when there isn't enough signal (too few frames/footstrikes) to compute a value;
-  `computeLandingForm` also returns `null` when `fpsTier === "blocked"`, gating on the Batch 2
-  fps tier per PRD Section 5/6 (confidence is `"full"`/`"reduced"` mirroring that tier
-  otherwise).
+  `computeOverstride`, `computeHipDrop`, `computeArmSwingSymmetry`, `computeLandingForm`), plus
+  two metrics added later that are **not** in the PRD's original list — `computeGroundContactTime`
+  and `computeFlightTime` (see below) — and `computeMetrics(frames, fpsTier)` which runs all
+  eight. Each returns `null` — not a misleading zero — when there isn't enough signal (too few
+  frames/footstrikes) to compute a value; `computeLandingForm` also returns `null` when
+  `fpsTier === "blocked"`, gating on the Batch 2 fps tier per PRD Section 5/6 (confidence is
+  `"full"`/`"reduced"` mirroring that tier otherwise). The two added metrics aren't in the
+  Supabase schema (`supabase/migrations/`) or the `analyses` API yet — see the Batch 4 section
+  below — since nothing currently saves computed metrics from this page at all.
   - `computeHipDrop(frames, cameraAngle?)` now actually enforces the PRD's own caveat that it
     needs front/rear-angle video, instead of just documenting it: it calls `inferCameraAngle`
     (or accepts an explicit override) and returns `null` for a side-on shot, rather than the
@@ -166,6 +169,27 @@ metrics" button. Results render in a `MetricsPanel` below the video, one row per
     of motion. A landmark with no `visibility` field at all (true of most synthetic test
     fixtures) is treated as fully trusted, so this is purely additive: it only ever excludes
     data, never invents it.
+  - `computeOverstride` and `computeVerticalOscillation` now also report a leg-length-normalized
+    percentage (`overstridePercentLegLength`, `oscillationPercentLegLength`) alongside the raw cm
+    value, via a private `estimateLegLengthMeters` helper (max observed hip-to-ankle distance
+    across the clip — a bent knee always *shortens* that distance, so the max is the closest
+    proxy for true leg length at full extension). Motivated by looking at a competitor
+    (ochy.io/Ochy): raw cm makes a taller runner's numbers look "bigger" for identical relative
+    form; normalizing against the runner's own leg length (already sitting in the tracked
+    landmarks — no new capture step) is the more comparable number. Null when no hip/ankle pair
+    was ever visible enough to sample; the raw cm value is unaffected either way.
+  - `computeGroundContactTime` and `computeFlightTime` (new) — also motivated by the Ochy
+    research: time from footstrike to toe-off, and from toe-off to the next footstrike (either
+    foot), the airborne phase distinguishing running from walking. Built on `strides.ts`'s new
+    `detectStrides`/`detectAllStrides`, which extend footstrike detection with a **toe-off**
+    event: the first point after a footstrike where the ankle-relative-height signal drops below
+    a fraction (`DEFAULT_TOE_OFF_DROP_RATIO`, 0.3) of the way toward that stride's swing-phase
+    trough — a simple threshold-crossing heuristic, not a biomechanically precise contact-force
+    detector. Both new metrics are gated by the Batch 2 fps tier exactly like `computeLandingForm`
+    (null when blocked, confidence `"full"`/`"reduced"` mirroring the tier) since accurate
+    foot-contact timing needs the same frame-rate headroom as catching the strike-instant frame
+    does — this pairing (fps sensitivity + a `confidence` field) is why they reuse
+    `LandingFormConfidence` rather than inventing a parallel type.
 
 Every metric function is unit-tested (`*.test.ts` next to its source) against synthetic
 `PoseFrame` sequences built to have an exactly-derivable expected value — e.g. overstride and
