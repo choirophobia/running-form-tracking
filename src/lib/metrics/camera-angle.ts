@@ -1,5 +1,5 @@
 import { average } from "./geometry";
-import { landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
+import { landmark, POSE_LANDMARK, tryNormalizedLandmark, type PoseFrame } from "./pose-landmarks";
 
 // Neither of these functions needs the camera angle to be told to them —
 // they infer it from the pose data already being collected, since the
@@ -54,50 +54,91 @@ export function inferCameraAngle(frames: PoseFrame[]): CameraAngleGuess {
   return ratio < SIDE_VIEW_HIP_SEPARATION_RATIO ? "side" : "front-or-rear";
 }
 
-export type TravelAxis = "x" | "z";
+// Only "x" is meaningful here — see inferDirectionOfTravelAxis's doc
+// comment for why there's no usable second axis once this is based on
+// normalized landmarks. Kept as a named type (rather than a bare boolean)
+// so computeOverstride's `ankle[travelAxis]` indexing reads the same way
+// it always has.
+export type TravelAxis = "x";
 
-// Below this ratio between the two horizontal axes' movement range, there
-// isn't a clearly dominant direction of travel (e.g. running in place, or
-// a treadmill shot centered on the runner) — not confident enough to sign
-// an overstride value against.
-const MIN_DOMINANT_AXIS_RATIO = 2;
+// The normalized hip midpoint needs to travel at least this many "hip
+// widths" across the frame to count as real translation rather than sway/
+// jitter — a body-scale-relative threshold (via normalized hip
+// separation) rather than a fixed absolute one, so it's robust to how
+// zoomed-in the shot is.
+const MIN_TRAVEL_RATIO = 3;
 
 /**
- * Infers which horizontal axis (camera-relative x or z) the runner is
- * translating along over the course of the clip, from how much the hip
- * midpoint's range of motion on each axis differs — a side shot typically
- * shows a clear, dominant direction of travel across the frame. Returns
- * null when neither axis clearly dominates (falls back to an undirected
- * measurement — see computeOverstride).
+ * Infers whether the runner is translating horizontally across the frame
+ * over the course of the clip — from the **normalized** (image-space) hip
+ * midpoint's x range, not world landmarks. World landmarks can't answer
+ * this: their origin is the hip midpoint itself, reset every frame (see
+ * pose-landmarks.ts), so the hip's own world position is always ~(0,0,0)
+ * and never shows real movement. Normalized x is a genuine absolute
+ * image-plane coordinate, so it does.
+ *
+ * There's deliberately no second candidate axis the way the old world-
+ * landmark version compared x against z: normalized y is already spoken
+ * for by vertical oscillation (bounce), and normalized z is *still*
+ * hip-relative depth, not absolute, even on normalized landmarks — using
+ * either as a travel-direction signal would either double-count bounce as
+ * "travel" or just reproduce the same broken-origin problem this function
+ * exists to avoid.
+ *
+ * Returns null when there isn't a clearly dominant horizontal drift (e.g.
+ * running in place, a treadmill shot, or frames missing
+ * `normalizedLandmarks` entirely) — falls back to an undirected
+ * measurement, see computeOverstride.
  */
 export function inferDirectionOfTravelAxis(frames: PoseFrame[]): TravelAxis | null {
-  if (frames.length < 2) return null;
+  const hipMidXs: number[] = [];
+  const hipWidths: number[] = [];
 
-  const hipMidX = frames.map(
-    (f) => (landmark(f, POSE_LANDMARK.LEFT_HIP).x + landmark(f, POSE_LANDMARK.RIGHT_HIP).x) / 2
-  );
-  const hipMidZ = frames.map(
-    (f) => (landmark(f, POSE_LANDMARK.LEFT_HIP).z + landmark(f, POSE_LANDMARK.RIGHT_HIP).z) / 2
-  );
+  for (const f of frames) {
+    const leftHip = tryNormalizedLandmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = tryNormalizedLandmark(f, POSE_LANDMARK.RIGHT_HIP);
+    if (!leftHip || !rightHip) continue;
+    hipMidXs.push((leftHip.x + rightHip.x) / 2);
+    hipWidths.push(Math.abs(leftHip.x - rightHip.x));
+  }
+  if (hipMidXs.length < 2) return null;
 
-  const rangeX = Math.max(...hipMidX) - Math.min(...hipMidX);
-  const rangeZ = Math.max(...hipMidZ) - Math.min(...hipMidZ);
+  const avgHipWidth = average(hipWidths);
+  if (avgHipWidth === 0) return null;
 
-  if (rangeX === 0 && rangeZ === 0) return null;
-  if (rangeX >= rangeZ * MIN_DOMINANT_AXIS_RATIO) return "x";
-  if (rangeZ >= rangeX * MIN_DOMINANT_AXIS_RATIO) return "z";
-  return null;
+  const rangeX = Math.max(...hipMidXs) - Math.min(...hipMidXs);
+  return rangeX >= avgHipWidth * MIN_TRAVEL_RATIO ? "x" : null;
 }
 
-/** +1 if the hip midpoint net-moved in the positive direction of `axis`
- * over the clip, -1 if negative — the sign convention "ahead" is measured
- * against for a signed overstride value. Simplification: uses net
- * displacement across the whole clip, not per-stride velocity, so a clip
- * that reverses direction partway through (e.g. runs away from camera then
- * back) would get this wrong for the second half — acceptable for a
- * straight-line running shot, which is the assumed case. */
-export function inferTravelSign(frames: PoseFrame[], axis: TravelAxis): 1 | -1 {
-  const hipMid = (f: PoseFrame) =>
-    (landmark(f, POSE_LANDMARK.LEFT_HIP)[axis] + landmark(f, POSE_LANDMARK.RIGHT_HIP)[axis]) / 2;
-  return hipMid(frames[frames.length - 1]) >= hipMid(frames[0]) ? 1 : -1;
+/**
+ * +1 if the (normalized) hip midpoint net-moved in the positive x
+ * direction over the clip, -1 if negative — the sign convention "ahead"
+ * is measured against for a signed overstride value. The actual overstride
+ * *magnitude* still comes from world landmarks (a same-frame, real-meters
+ * measurement, which is valid); this only supplies the sign, assuming
+ * world-x and normalized-x point the same real-world direction — the same
+ * kind of axis-alignment assumption `PoseFrame`'s Y-down note already
+ * makes, documented there rather than re-litigated here.
+ *
+ * No axis parameter (unlike the old world-landmark version): there's only
+ * ever one meaningful travel axis now — see TravelAxis/
+ * inferDirectionOfTravelAxis — so the caller already knows it's "x" by
+ * the time it decides to call this at all.
+ *
+ * Simplification: uses net displacement across the whole clip, not
+ * per-stride velocity, so a clip that reverses direction partway through
+ * (e.g. runs away from camera then back) would get this wrong for the
+ * second half — acceptable for a straight-line running shot, the assumed
+ * case.
+ */
+export function inferTravelSign(frames: PoseFrame[]): 1 | -1 {
+  const hipMidX = (f: PoseFrame): number | null => {
+    const leftHip = tryNormalizedLandmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = tryNormalizedLandmark(f, POSE_LANDMARK.RIGHT_HIP);
+    return leftHip && rightHip ? (leftHip.x + rightHip.x) / 2 : null;
+  };
+
+  const first = frames.map(hipMidX).find((x) => x !== null) ?? 0;
+  const last = [...frames].reverse().map(hipMidX).find((x) => x !== null) ?? 0;
+  return last >= first ? 1 : -1;
 }

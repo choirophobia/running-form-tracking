@@ -6,7 +6,13 @@ import {
   type CameraAngleGuess,
 } from "./camera-angle";
 import { angleAtVertex, average, distance, magnitude, midpoint } from "./geometry";
-import { allVisible, landmark, POSE_LANDMARK, type PoseFrame } from "./pose-landmarks";
+import {
+  allVisible,
+  landmark,
+  POSE_LANDMARK,
+  tryNormalizedLandmark,
+  type PoseFrame,
+} from "./pose-landmarks";
 import { detectAllFootstrikes, detectAllStrides } from "./strides";
 
 // Batch 3: pure metric-computation functions per PRD Section 6. Each takes
@@ -38,6 +44,39 @@ function estimateLegLengthMeters(frames: PoseFrame[]): number | null {
     const rightAnkle = landmark(f, POSE_LANDMARK.RIGHT_ANKLE);
     if (allVisible([leftHip, leftAnkle])) distances.push(distance(leftHip, leftAnkle));
     if (allVisible([rightHip, rightAnkle])) distances.push(distance(rightHip, rightAnkle));
+  }
+  if (distances.length === 0) return null;
+  return Math.max(...distances);
+}
+
+/**
+ * Same idea as estimateLegLengthMeters but measured on normalized
+ * (image-plane) landmarks instead of world landmarks, as a 2D x/y
+ * distance — not a drop-in 3D equivalent, since normalized z is still
+ * hip-relative depth (see pose-landmarks.ts), so it's deliberately left
+ * out here rather than mixed in as if it were comparable to x/y.
+ *
+ * This exists purely as a calibration reference: computeVerticalOscillation
+ * measures bounce in normalized units (the only space where cross-frame
+ * hip position is meaningful at all — see PoseFrame's doc comment) and
+ * needs a real-world-to-normalized-unit conversion factor to report cm.
+ * Leg length is a convenient shared yardstick because it's a same-frame
+ * measurement, valid in both coordinate spaces, so the ratio between its
+ * world-meters and normalized-2D readings gives exactly that factor.
+ */
+function estimateLegLengthNormalized2D(frames: PoseFrame[]): number | null {
+  const distances: number[] = [];
+  for (const f of frames) {
+    const leftHip = tryNormalizedLandmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = tryNormalizedLandmark(f, POSE_LANDMARK.RIGHT_HIP);
+    const leftAnkle = tryNormalizedLandmark(f, POSE_LANDMARK.LEFT_ANKLE);
+    const rightAnkle = tryNormalizedLandmark(f, POSE_LANDMARK.RIGHT_ANKLE);
+    if (leftHip && leftAnkle && allVisible([leftHip, leftAnkle])) {
+      distances.push(Math.hypot(leftHip.x - leftAnkle.x, leftHip.y - leftAnkle.y));
+    }
+    if (rightHip && rightAnkle && allVisible([rightHip, rightAnkle])) {
+      distances.push(Math.hypot(rightHip.x - rightAnkle.x, rightHip.y - rightAnkle.y));
+    }
   }
   if (distances.length === 0) return null;
   return Math.max(...distances);
@@ -75,35 +114,56 @@ export interface VerticalOscillationResult {
   oscillationPercentLegLength: number | null;
 }
 
-/** Hip-midpoint bounce per stride cycle (PRD: "Hip landmark bounce"),
- * averaged across all detected stride cycles and converted to cm. */
+/**
+ * Hip-midpoint bounce per stride cycle (PRD: "Hip landmark bounce"),
+ * averaged across all detected stride cycles and converted to cm.
+ *
+ * Tracked via **normalized** landmarks, not world landmarks — world
+ * landmarks re-center to the hip midpoint on every single frame, so the
+ * hip's own world-Y position is always ~0 and can never show bounce (see
+ * pose-landmarks.ts). Normalized Y is a genuine absolute image-plane
+ * coordinate, so cross-frame hip movement shows up there. That leaves
+ * normalized (dimensionless, [0,1]) units to convert to real cm, which is
+ * what estimateLegLengthNormalized2D's scale factor is for.
+ *
+ * Returns null (not a zero/undercounted number) when there's no usable
+ * normalized data or no leg-length calibration reference — e.g. older
+ * frames that only captured world landmarks.
+ */
 export function computeVerticalOscillation(frames: PoseFrame[]): VerticalOscillationResult | null {
   const strikeFrameIndices = detectAllFootstrikes(frames)
     .map((s) => s.frameIndex)
     .sort((a, b) => a - b);
   if (strikeFrameIndices.length < 2) return null;
 
-  const hipY = frames.map(
-    (f) => midpoint(landmark(f, POSE_LANDMARK.LEFT_HIP), landmark(f, POSE_LANDMARK.RIGHT_HIP)).y
-  );
+  const hipY = frames.map((f) => {
+    const leftHip = tryNormalizedLandmark(f, POSE_LANDMARK.LEFT_HIP);
+    const rightHip = tryNormalizedLandmark(f, POSE_LANDMARK.RIGHT_HIP);
+    return leftHip && rightHip ? (leftHip.y + rightHip.y) / 2 : null;
+  });
 
   const amplitudes: number[] = [];
   for (let i = 0; i < strikeFrameIndices.length - 1; i++) {
     const start = strikeFrameIndices[i];
     const end = strikeFrameIndices[i + 1];
     if (end <= start) continue;
-    const segment = hipY.slice(start, end + 1);
+    const segment = hipY.slice(start, end + 1).filter((y): y is number => y !== null);
+    if (segment.length < 2) continue;
     amplitudes.push(Math.max(...segment) - Math.min(...segment));
   }
   if (amplitudes.length === 0) return null;
 
-  const oscillationCm = average(amplitudes) * METERS_TO_CM;
   const legLengthM = estimateLegLengthMeters(frames);
+  const legLengthNormalized = estimateLegLengthNormalized2D(frames);
+  if (!legLengthM || !legLengthNormalized) return null;
+  const metersPerNormalizedUnit = legLengthM / legLengthNormalized;
+
+  const oscillationCm = average(amplitudes) * metersPerNormalizedUnit * METERS_TO_CM;
 
   return {
     oscillationCm,
     sampleCount: amplitudes.length,
-    oscillationPercentLegLength: legLengthM ? (oscillationCm / METERS_TO_CM / legLengthM) * 100 : null,
+    oscillationPercentLegLength: (oscillationCm / METERS_TO_CM / legLengthM) * 100,
   };
 }
 
@@ -149,7 +209,7 @@ export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null 
   if (strikes.length === 0) return null;
 
   const travelAxis = inferDirectionOfTravelAxis(frames);
-  const travelSign = travelAxis ? inferTravelSign(frames, travelAxis) : null;
+  const travelSign = travelAxis ? inferTravelSign(frames) : null;
 
   const distances: number[] = [];
   for (const strike of strikes) {
@@ -297,6 +357,15 @@ export interface LandingFormResult {
  * a clear strike pattern. */
 const HEEL_TOE_THRESHOLD_M = 0.01;
 
+/** heel.y - toe.y under the Y-down assumption: positive means the heel is
+ * lower (closer to the ground) than the toe. Shared by computeLandingForm
+ * and computeStrideDiagnostics so they can never disagree. */
+function classifyFootStrikePattern(heelToeDeltaM: number): FootStrikePattern {
+  if (heelToeDeltaM > HEEL_TOE_THRESHOLD_M) return "heel";
+  if (heelToeDeltaM < -HEEL_TOE_THRESHOLD_M) return "forefoot";
+  return "midfoot";
+}
+
 /**
  * Classifies footstrike pattern (heel/midfoot/forefoot) from the relative
  * height of the heel vs. toe landmark at each footstrike. Gated by the
@@ -324,10 +393,7 @@ export function computeLandingForm(frames: PoseFrame[], fpsTier: FpsTier): Landi
     const toe = landmark(f, toeIndex);
     if (!allVisible([heel, toe])) continue;
 
-    const delta = heel.y - toe.y; // Y-down: larger = lower
-    if (delta > HEEL_TOE_THRESHOLD_M) patterns.push("heel");
-    else if (delta < -HEEL_TOE_THRESHOLD_M) patterns.push("forefoot");
-    else patterns.push("midfoot");
+    patterns.push(classifyFootStrikePattern(heel.y - toe.y));
   }
   if (patterns.length === 0) return null;
 
@@ -418,6 +484,67 @@ export function computeFlightTime(frames: PoseFrame[], fpsTier: FpsTier): Flight
     confidence: fpsTier === "full" ? "full" : "reduced",
     sampleCount: durations.length,
   };
+}
+
+export interface StrideDiagnostic {
+  side: "left" | "right";
+  frameIndex: number;
+  timestampMs: number;
+  /** Gap from the *previous* strike in the combined (both-feet) stream —
+   * null for the first strike. This is exactly what computeCadence
+   * averages; an implausibly small value here (e.g. two strikes a few
+   * frames apart) means the detector is probably over-counting, not that
+   * the runner actually took a step that fast. */
+  intervalFromPreviousMs: number | null;
+  toeOffTimestampMs: number | null;
+  groundContactMs: number | null;
+  /** Null only when the heel/toe landmarks weren't visible enough to
+   * sample — not when the delta is small (that's a real "midfoot" read). */
+  heelY: number | null;
+  toeY: number | null;
+  heelToeDeltaM: number | null;
+  landingFormPattern: FootStrikePattern | null;
+}
+
+/**
+ * Debug/audit tool, not a product metric: one row per detected stride
+ * (both feet, chronological — the same event stream computeCadence and
+ * computeLandingForm are built from) with the raw numbers behind both.
+ * Unlike computeLandingForm, this is **not** gated by fps tier — it always
+ * shows the raw heel/toe classification so the gating logic itself can be
+ * inspected separately from the underlying geometry.
+ *
+ * Built specifically to let a human cross-check the algorithm against
+ * what they actually see in the source video: does the strike count/
+ * timing look plausible, and does the classified landing-form pattern at
+ * a given timestamp match what that frame of video actually shows.
+ */
+export function computeStrideDiagnostics(frames: PoseFrame[]): StrideDiagnostic[] {
+  const strides = detectAllStrides(frames);
+
+  return strides.map((stride, i) => {
+    const f = frames[stride.frameIndex];
+    const heelIndex = stride.side === "left" ? POSE_LANDMARK.LEFT_HEEL : POSE_LANDMARK.RIGHT_HEEL;
+    const toeIndex = stride.side === "left" ? POSE_LANDMARK.LEFT_FOOT_INDEX : POSE_LANDMARK.RIGHT_FOOT_INDEX;
+    const heel = landmark(f, heelIndex);
+    const toe = landmark(f, toeIndex);
+    const landmarksVisible = allVisible([heel, toe]);
+    const heelToeDeltaM = landmarksVisible ? heel.y - toe.y : null;
+
+    return {
+      side: stride.side,
+      frameIndex: stride.frameIndex,
+      timestampMs: stride.timestampMs,
+      intervalFromPreviousMs: i > 0 ? stride.timestampMs - strides[i - 1].timestampMs : null,
+      toeOffTimestampMs: stride.toeOffTimestampMs,
+      groundContactMs:
+        stride.toeOffTimestampMs !== null ? stride.toeOffTimestampMs - stride.timestampMs : null,
+      heelY: landmarksVisible ? heel.y : null,
+      toeY: landmarksVisible ? toe.y : null,
+      heelToeDeltaM,
+      landingFormPattern: heelToeDeltaM !== null ? classifyFootStrikePattern(heelToeDeltaM) : null,
+    };
+  });
 }
 
 function mostCommon<T extends string>(items: T[]): T {

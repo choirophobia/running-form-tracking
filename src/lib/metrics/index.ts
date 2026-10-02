@@ -33,6 +33,7 @@ export {
   computeLandingForm,
   computeGroundContactTime,
   computeFlightTime,
+  computeStrideDiagnostics,
   type MetricsResult,
   type CadenceResult,
   type VerticalOscillationResult,
@@ -44,4 +45,5 @@ export {
   type LandingFormConfidence,
   type GroundContactTimeResult,
   type FlightTimeResult,
+  type StrideDiagnostic,
 } from "./metrics";

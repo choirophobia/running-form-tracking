@@ -8,6 +8,7 @@ import {
   computeLandingForm,
   computeMetrics,
   computeOverstride,
+  computeStrideDiagnostics,
   computeVerticalOscillation,
 } from "./metrics";
 import { POSE_LANDMARK, type PoseFrame, type PoseLandmark } from "./pose-landmarks";
@@ -76,7 +77,16 @@ function buildStrideSession(options: {
     points[POSE_LANDMARK.LEFT_SHOULDER] = { x: hipMidX - 0.1, y: hipMidY - 0.5, z: 0 };
     points[POSE_LANDMARK.RIGHT_SHOULDER] = { x: hipMidX + 0.1, y: hipMidY - 0.5, z: 0 };
 
-    frames.push({ timestampMs: t, worldLandmarks: points });
+    // Mirrors worldLandmarks' x/y exactly (not a realistic normalized
+    // [0,1] image-space range, but these tests never depend on the actual
+    // scale) so that computeVerticalOscillation's world/normalized
+    // leg-length calibration ratio comes out to exactly 1 — letting tests
+    // keep asserting closed-form expected values without separately
+    // deriving a normalized-space fixture. See camera-angle.test.ts for
+    // fixtures that *do* care about realistic normalized hip-width scale.
+    const normalizedLandmarks = points.map((p) => ({ ...p }));
+
+    frames.push({ timestampMs: t, worldLandmarks: points, normalizedLandmarks });
   }
   return frames;
 }
@@ -535,6 +545,79 @@ describe("computeFlightTime", () => {
 
   it("returns null with no detected strides", () => {
     expect(computeFlightTime([], "full")).toBeNull();
+  });
+});
+
+describe("computeStrideDiagnostics", () => {
+  it("returns one row per stride, chronologically, with null interval only for the first", () => {
+    const session = buildStrideSession({ durationMs: 3000, periodMs: 600, leftPhaseMs: 150, rightPhaseMs: 450 });
+    const rows = computeStrideDiagnostics(session);
+
+    expect(rows).toHaveLength(10);
+    expect(rows[0].intervalFromPreviousMs).toBeNull();
+    for (let i = 1; i < rows.length; i++) {
+      expect(rows[i].intervalFromPreviousMs).not.toBeNull();
+      expect(rows[i].intervalFromPreviousMs).toBeCloseTo(
+        rows[i].timestampMs - rows[i - 1].timestampMs,
+        6
+      );
+      // Chronological, matching computeCadence's own ordering assumption.
+      expect(rows[i].timestampMs).toBeGreaterThanOrEqual(rows[i - 1].timestampMs);
+    }
+  });
+
+  it("reports ground contact time consistent with the strike/toe-off timestamps", () => {
+    const session = buildStrideSession({});
+    const rows = computeStrideDiagnostics(session);
+    for (const row of rows) {
+      if (row.toeOffTimestampMs === null) {
+        expect(row.groundContactMs).toBeNull();
+      } else {
+        expect(row.groundContactMs).toBeCloseTo(row.toeOffTimestampMs - row.timestampMs, 6);
+      }
+    }
+  });
+
+  it("matches computeLandingForm's classification for a known heel strike", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HEEL] = { x: -0.1, y: 0.95, z: 0 };
+        points[POSE_LANDMARK.LEFT_FOOT_INDEX] = { x: -0.1, y: 0.9, z: 0.1 };
+        points[POSE_LANDMARK.RIGHT_HEEL] = { x: 0.1, y: 0.95, z: 0 };
+        points[POSE_LANDMARK.RIGHT_FOOT_INDEX] = { x: 0.1, y: 0.9, z: 0.1 };
+      },
+    });
+    const rows = computeStrideDiagnostics(session);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.landingFormPattern).toBe("heel");
+      expect(row.heelToeDeltaM).toBeCloseTo(0.05, 6);
+      expect(row.heelY).toBeCloseTo(0.95, 6);
+      expect(row.toeY).toBeCloseTo(0.9, 6);
+    }
+  });
+
+  it("leaves heel/toe fields null when the landmarks have low visibility", () => {
+    const session = buildStrideSession({
+      augment: (points) => {
+        points[POSE_LANDMARK.LEFT_HEEL] = { x: -0.1, y: 0.95, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.LEFT_FOOT_INDEX] = { x: -0.1, y: 0.9, z: 0.1, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_HEEL] = { x: 0.1, y: 0.95, z: 0, visibility: 0.1 };
+        points[POSE_LANDMARK.RIGHT_FOOT_INDEX] = { x: 0.1, y: 0.9, z: 0.1, visibility: 0.1 };
+      },
+    });
+    const rows = computeStrideDiagnostics(session);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.heelY).toBeNull();
+      expect(row.toeY).toBeNull();
+      expect(row.heelToeDeltaM).toBeNull();
+      expect(row.landingFormPattern).toBeNull();
+    }
+  });
+
+  it("returns an empty array with no detected strides", () => {
+    expect(computeStrideDiagnostics([])).toEqual([]);
   });
 });
 
