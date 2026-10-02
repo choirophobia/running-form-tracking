@@ -87,6 +87,13 @@ export interface CadenceResult {
    * definition, i.e. every footstrike counts, not just one leg's strides. */
   stepsPerMinute: number;
   sampleCount: number;
+  /** Each stride-to-stride interval converted to its own instantaneous
+   * steps/min, chronological — for a per-stride strip-plot view of
+   * consistency, not used to derive stepsPerMinute itself (that averages
+   * the raw intervals, not these converted rates — the two differ
+   * slightly, harmonic vs. arithmetic mean, so don't expect this array's
+   * average to equal stepsPerMinute exactly). */
+  perStrideStepsPerMinute: number[];
 }
 
 export function computeCadence(frames: PoseFrame[]): CadenceResult | null {
@@ -100,7 +107,11 @@ export function computeCadence(frames: PoseFrame[]): CadenceResult | null {
   const avgIntervalMs = average(intervals);
   if (avgIntervalMs <= 0) return null;
 
-  return { stepsPerMinute: 60000 / avgIntervalMs, sampleCount: intervals.length };
+  return {
+    stepsPerMinute: 60000 / avgIntervalMs,
+    sampleCount: intervals.length,
+    perStrideStepsPerMinute: intervals.map((ms) => 60000 / ms),
+  };
 }
 
 export interface VerticalOscillationResult {
@@ -243,6 +254,9 @@ export function computeOverstride(frames: PoseFrame[]): OverstrideResult | null 
 export interface HipDropResult {
   hipDropDegrees: number;
   sampleCount: number;
+  /** Individual per-footstrike readings behind the average, chronological —
+   * for a per-stride strip-plot view of consistency. */
+  samples: number[];
 }
 
 /**
@@ -281,7 +295,7 @@ export function computeHipDrop(
   }
   if (angles.length === 0) return null;
 
-  return { hipDropDegrees: average(angles), sampleCount: angles.length };
+  return { hipDropDegrees: average(angles), sampleCount: angles.length, samples: angles };
 }
 
 export interface ArmSwingSymmetryResult {
@@ -291,13 +305,52 @@ export interface ArmSwingSymmetryResult {
   rightRangeOfMotionDegrees: number;
   leftSampleCount: number;
   rightSampleCount: number;
+  /** The same 0-100 symmetry definition as symmetryScore, computed
+   * independently within each combined footstrike-to-footstrike interval
+   * (the same segmentation computeVerticalOscillation uses) — for a
+   * per-stride strip-plot view of consistency. A segment is omitted when
+   * either arm has fewer than 2 visible samples within it (not enough
+   * signal for a ROM reading in that narrow window), so this can be
+   * shorter than the stride count. */
+  perStrideSymmetryScores: number[];
+}
+
+function elbowAnglesInRange(
+  frames: PoseFrame[],
+  side: "left" | "right",
+  start: number,
+  end: number
+): number[] {
+  const shoulderIndex = side === "left" ? POSE_LANDMARK.LEFT_SHOULDER : POSE_LANDMARK.RIGHT_SHOULDER;
+  const elbowIndex = side === "left" ? POSE_LANDMARK.LEFT_ELBOW : POSE_LANDMARK.RIGHT_ELBOW;
+  const wristIndex = side === "left" ? POSE_LANDMARK.LEFT_WRIST : POSE_LANDMARK.RIGHT_WRIST;
+
+  const angles: number[] = [];
+  for (let i = start; i <= end; i++) {
+    const f = frames[i];
+    const shoulder = landmark(f, shoulderIndex);
+    const elbow = landmark(f, elbowIndex);
+    const wrist = landmark(f, wristIndex);
+    if (!allVisible([shoulder, elbow, wrist])) continue;
+    angles.push(angleAtVertex(shoulder, elbow, wrist));
+  }
+  return angles;
+}
+
+function symmetryScoreFor(leftAngles: number[], rightAngles: number[]): number {
+  const leftRom = Math.max(...leftAngles) - Math.min(...leftAngles);
+  const rightRom = Math.max(...rightAngles) - Math.min(...rightAngles);
+  const largerRom = Math.max(leftRom, rightRom);
+  return largerRom === 0 ? 100 : 100 * (1 - Math.abs(leftRom - rightRom) / largerRom);
 }
 
 /**
  * Compares each arm's elbow-angle range of motion across the whole clip
- * (PRD: "Shoulder/elbow angle tracking") — not a per-stride metric, since
- * arm swing symmetry is about overall left/right balance, not a single
- * cycle.
+ * (PRD: "Shoulder/elbow angle tracking") — the headline symmetryScore is
+ * not a per-stride metric, since arm swing symmetry is fundamentally about
+ * overall left/right balance, not a single cycle. perStrideSymmetryScores
+ * below is a secondary, windowed view for spotting consistency/outliers,
+ * not a replacement for that whole-clip definition.
  *
  * Each arm's frames are filtered independently for landmark visibility —
  * on a side-on shot the far arm is frequently partly hidden behind the
@@ -308,38 +361,34 @@ export interface ArmSwingSymmetryResult {
 export function computeArmSwingSymmetry(frames: PoseFrame[]): ArmSwingSymmetryResult | null {
   if (frames.length < 2) return null;
 
-  const anglesFor = (side: "left" | "right"): number[] => {
-    const shoulderIndex = side === "left" ? POSE_LANDMARK.LEFT_SHOULDER : POSE_LANDMARK.RIGHT_SHOULDER;
-    const elbowIndex = side === "left" ? POSE_LANDMARK.LEFT_ELBOW : POSE_LANDMARK.RIGHT_ELBOW;
-    const wristIndex = side === "left" ? POSE_LANDMARK.LEFT_WRIST : POSE_LANDMARK.RIGHT_WRIST;
-
-    const angles: number[] = [];
-    for (const f of frames) {
-      const shoulder = landmark(f, shoulderIndex);
-      const elbow = landmark(f, elbowIndex);
-      const wrist = landmark(f, wristIndex);
-      if (!allVisible([shoulder, elbow, wrist])) continue;
-      angles.push(angleAtVertex(shoulder, elbow, wrist));
-    }
-    return angles;
-  };
-
-  const leftAngles = anglesFor("left");
-  const rightAngles = anglesFor("right");
+  const leftAngles = elbowAnglesInRange(frames, "left", 0, frames.length - 1);
+  const rightAngles = elbowAnglesInRange(frames, "right", 0, frames.length - 1);
   if (leftAngles.length === 0 || rightAngles.length === 0) return null;
 
   const leftRom = Math.max(...leftAngles) - Math.min(...leftAngles);
   const rightRom = Math.max(...rightAngles) - Math.min(...rightAngles);
-  const largerRom = Math.max(leftRom, rightRom);
 
-  const symmetryScore = largerRom === 0 ? 100 : 100 * (1 - Math.abs(leftRom - rightRom) / largerRom);
+  const strikeFrameIndices = detectAllFootstrikes(frames)
+    .map((s) => s.frameIndex)
+    .sort((a, b) => a - b);
+  const perStrideSymmetryScores: number[] = [];
+  for (let i = 0; i < strikeFrameIndices.length - 1; i++) {
+    const start = strikeFrameIndices[i];
+    const end = strikeFrameIndices[i + 1];
+    if (end <= start) continue;
+    const segLeft = elbowAnglesInRange(frames, "left", start, end);
+    const segRight = elbowAnglesInRange(frames, "right", start, end);
+    if (segLeft.length < 2 || segRight.length < 2) continue;
+    perStrideSymmetryScores.push(symmetryScoreFor(segLeft, segRight));
+  }
 
   return {
-    symmetryScore,
+    symmetryScore: symmetryScoreFor(leftAngles, rightAngles),
     leftRangeOfMotionDegrees: leftRom,
     rightRangeOfMotionDegrees: rightRom,
     leftSampleCount: leftAngles.length,
     rightSampleCount: rightAngles.length,
+    perStrideSymmetryScores,
   };
 }
 

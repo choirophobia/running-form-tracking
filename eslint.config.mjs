@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored skill content (ui-ux-pro-max-cli) — not our source, not
+    // meant to pass this project's lint rules.
+    ".claude/skills/**",
   ]),
 ]);
 

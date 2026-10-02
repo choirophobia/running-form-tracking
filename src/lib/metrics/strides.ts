@@ -122,15 +122,56 @@ export function detectFootstrikes(
   }));
 }
 
+/**
+ * Merges two already-chronological, single-foot event streams and drops
+ * any event landing less than `minSeparationMs` after the previously
+ * *kept* event, regardless of which foot either one came from.
+ *
+ * `detectFootstrikes`'s own `minSeparationMs` option only constrains
+ * events *within* one foot's own signal — it can't prevent a spurious
+ * detection on one foot (pose-tracking jitter producing a second,
+ * smaller-but-still-prominent bump well away from that foot's own real
+ * strikes) from landing implausibly close to a genuine detection on the
+ * *other* foot once merged. Confirmed as a real failure mode, not a
+ * hypothetical one: a synthetic case with such a bump collapses the
+ * merged interval to ~0ms, which inflates computeCadence's average (a
+ * handful of near-zero gaps drag the average interval down and the
+ * reported steps/min up) — this is what produced an implausible ~250spm
+ * reading on real footage.
+ *
+ * Callers pass half of their own per-foot `minSeparationMs` here — not an
+ * arbitrary extra constant: if one leg's own fastest plausible turnover is
+ * `minSeparationMs` apart, the fastest the *two* legs could ever alternate
+ * (perfectly out of phase) is half that. Keeping "whichever event was
+ * encountered first" per cluster is a simple, PoC-grade tie-break, not a
+ * judgment about which side's detection is more trustworthy.
+ */
+function mergeCrossFootFiltered<T extends FootstrikeEvent>(
+  left: T[],
+  right: T[],
+  minCombinedSeparationMs: number
+): T[] {
+  const merged = [...left, ...right].sort((a, b) => a.timestampMs - b.timestampMs);
+  const kept: T[] = [];
+  for (const event of merged) {
+    const previous = kept[kept.length - 1];
+    if (previous && event.timestampMs - previous.timestampMs < minCombinedSeparationMs) continue;
+    kept.push(event);
+  }
+  return kept;
+}
+
 /** Footstrikes for both feet, combined and sorted chronologically — the
- * event stream that cadence and per-strike metrics are computed from. */
+ * event stream that cadence and per-strike metrics are computed from. See
+ * `mergeCrossFootFiltered` for why this isn't a plain merge+sort. */
 export function detectAllFootstrikes(
   frames: PoseFrame[],
   options: DetectFootstrikesOptions = {}
 ): FootstrikeEvent[] {
   const left = detectFootstrikes(frames, "left", options);
   const right = detectFootstrikes(frames, "right", options);
-  return [...left, ...right].sort((a, b) => a.timestampMs - b.timestampMs);
+  const minSeparationMs = options.minSeparationMs ?? DEFAULT_MIN_STRIKE_SEPARATION_MS;
+  return mergeCrossFootFiltered(left, right, minSeparationMs / 2);
 }
 
 export interface StrideEvent extends FootstrikeEvent {
@@ -209,12 +250,17 @@ export function detectStrides(
   });
 }
 
-/** Stride events for both feet, combined and sorted chronologically. */
+/** Stride events for both feet, combined and sorted chronologically. Same
+ * cross-foot filtering as `detectAllFootstrikes` — see
+ * `mergeCrossFootFiltered` — since a spurious close detection would
+ * corrupt ground-contact-time/flight-time averages the same way it
+ * inflates cadence. */
 export function detectAllStrides(
   frames: PoseFrame[],
   options: DetectFootstrikesOptions & { toeOffDropRatio?: number } = {}
 ): StrideEvent[] {
   const left = detectStrides(frames, "left", options);
   const right = detectStrides(frames, "right", options);
-  return [...left, ...right].sort((a, b) => a.timestampMs - b.timestampMs);
+  const minSeparationMs = options.minSeparationMs ?? DEFAULT_MIN_STRIKE_SEPARATION_MS;
+  return mergeCrossFootFiltered(left, right, minSeparationMs / 2);
 }

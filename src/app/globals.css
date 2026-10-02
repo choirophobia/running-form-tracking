@@ -1,15 +1,46 @@
 @import "tailwindcss";
 
-/* Design tokens — see running-brand-design-tokens.md, the single source of
- * truth for this file. One committed light aesthetic (warm paper/ink), no
- * dark-mode variant — the tokens doc doesn't define one. */
+/* Design tokens — see running-brand-design-tokens.md for the SHARED base
+ * (it documents a light paper/ink aesthetic; this app has since diverged
+ * further — see CLAUDE.md's Design system section for the full history of
+ * why, and why that's a deliberate local choice, not a shared-doc edit).
+ *
+ * This app now runs a DARK variant — a direct response to feedback that
+ * the original light/cream theme didn't read as a "strong, sport-defined"
+ * UI. Variable NAMES are unchanged from the light theme (`--ink` is still
+ * "primary text," `--paper` is still "background") so every `bg-paper` /
+ * `text-ink` class across the codebase keeps working without a rename —
+ * but the VALUES are now inverted: `--paper` (background) is near-black,
+ * `--ink` (text) is near-white. Read the name as its *role*, not its
+ * literal English meaning.
+ *
+ * Every value below was checked against WCAG contrast math before use
+ * (see the dark-mode section of CLAUDE.md's Design system notes for the
+ * actual ratios), not eyeballed:
+ * - `--rust` and `--field` are brightened from their light-theme hex —
+ *   the originals were tuned as dark text on a light background, so they
+ *   read as near-invisible dark-on-dark here (--field's original
+ *   #3c4a2e against this background is ~1.9:1, well under even the
+ *   large-text 3:1 floor).
+ * - `--energy` is back to the vivid neon-lime first pitched for the light
+ *   theme and rejected there for exactly this reason — a bright accent
+ *   that fails on a light background is often exactly right on a dark
+ *   one. No value change needed going dark; it was always the "right"
+ *   color for this surface.
+ * - `--line` (hairline borders) is deliberately LOW-contrast against the
+ *   new background (~1.25:1, matching the light theme's own ~1.28:1
+ *   line-vs-paper subtlety) — hairlines are meant to be felt, not read,
+ *   so matching the *light* theme's low ratio here (not its text-level
+ *   4.5:1+) is intentional, not an oversight.
+ */
 :root {
-  --ink: #12130f;
-  --paper: #f2efe6;
+  --ink: #f2efe6;
+  --paper: #15140f;
   --stone: #b8b2a1;
-  --rust: #b5502e;
-  --field: #3c4a2e;
-  --line: #dad5c6;
+  --rust: #ff7a4d;
+  --field: #8fbf5a;
+  --line: #2a281f;
+  --energy: #d4ff4f;
 }
 
 @theme inline {
@@ -19,6 +50,7 @@
   --color-rust: var(--rust);
   --color-field: var(--field);
   --color-line: var(--line);
+  --color-energy: var(--energy);
 
   /* Display: big numbers (cadence, score) and section titles only — never
    * body copy. Body: sentence case throughout. Mono: numeric readouts and
@@ -31,6 +63,10 @@
 body {
   background: var(--paper);
   color: var(--ink);
+  /* So native widgets (the <video> element's own control bar, scrollbars,
+   * the hidden file-input's OS picker chrome) render in their dark variant
+   * instead of a jarring light-themed default against this background. */
+  color-scheme: dark;
 }
 
 /* The one motion moment the design tokens call for: the report revealing

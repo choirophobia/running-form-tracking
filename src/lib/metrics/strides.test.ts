@@ -127,6 +127,42 @@ describe("detectAllFootstrikes", () => {
       expect(all[i].side).not.toBe(all[i - 1].side);
     }
   });
+
+  it("does not let a spurious close cross-foot detection collapse the merged interval (regression)", () => {
+    // Left foot's genuine gait: real peaks at 200, 1000, 1800ms (period
+    // 800ms). A spurious secondary bump is injected into the LEFT signal
+    // at 600ms — >=400ms from both of the left foot's own real peaks, well
+    // clear of detectFootstrikes' own 300ms per-foot minimum, so it
+    // legitimately survives per-foot peak detection. The RIGHT foot's real
+    // peak also lands at 600ms, so once merged, the spurious left event
+    // and the real right event land ~0ms apart — exactly the failure mode
+    // a per-foot-only separation check can't catch (see
+    // DEFAULT_MIN_STRIKE_SEPARATION_MS's doc comment).
+    const periodMs = 800;
+    const durationMs = 2400;
+    const bumpCenterMs = 600;
+    const bumpHalfWidthMs = 150;
+    const frames: PoseFrame[] = [];
+    for (let t = 0; t <= durationMs; t += FRAME_INTERVAL_MS) {
+      const points = neutralWorldLandmarks();
+      const leftBase = 0.9 + 0.05 * Math.cos((2 * Math.PI * (t - 200)) / periodMs);
+      const bump =
+        Math.abs(t - bumpCenterMs) < bumpHalfWidthMs
+          ? (0.08 * (1 + Math.cos((Math.PI * (t - bumpCenterMs)) / bumpHalfWidthMs))) / 2
+          : 0;
+      const rightY = 0.9 + 0.05 * Math.cos((2 * Math.PI * (t - bumpCenterMs)) / periodMs);
+      points[POSE_LANDMARK.LEFT_ANKLE] = { x: -0.1, y: leftBase + bump, z: 0 };
+      points[POSE_LANDMARK.RIGHT_ANKLE] = { x: 0.1, y: rightY, z: 0 };
+      frames.push({ timestampMs: t, worldLandmarks: points });
+    }
+
+    const all = detectAllFootstrikes(frames);
+    // Real human feet can't alternate faster than this — any gap smaller
+    // means two detections for what was physically one event.
+    for (let i = 1; i < all.length; i++) {
+      expect(all[i].timestampMs - all[i - 1].timestampMs).toBeGreaterThan(150);
+    }
+  });
 });
 
 describe("detectStrides", () => {

@@ -402,6 +402,57 @@ Verified via Vitest (118 tests passing, including new fixtures for `tryNormalize
 rewritten `inferDirectionOfTravelAxis`/`inferTravelSign`, and vertical-oscillation calibration) plus
 `npm run lint` and `npm run build`.
 
+## Per-stride strip plots (UI, on top of the metrics above)
+
+`src/app/page.tsx`'s report cards for Cadence, Hip drop, and Arm swing symmetry each show a small
+dot-per-stride strip plot (`StripPlot` component) below the headline number, so session-wide
+*consistency* is visible at a glance instead of only the averaged value. Deliberately not a
+charting-library widget — this project has no chart dependency anywhere, and three small plots
+don't justify adding one; it's plain SVG-free CSS (absolutely-positioned dots on a hairline axis,
+3-lane vertical stagger so overlapping values stay visible as distinct dots, mono-font axis
+labels per the type system's numeric-readout rule).
+
+This required extending three `metrics.ts` functions to expose per-sample arrays, not just
+aggregates — `computeCadence.perStrideStepsPerMinute`, `computeHipDrop.samples`,
+`computeArmSwingSymmetry.perStrideSymmetryScores`. The arm-swing one is a genuinely new
+computation, not just exposing an already-computed array: the headline `symmetryScore` is
+deliberately a whole-clip aggregate (see that function's doc comment — arm swing symmetry is
+about overall balance, not one cycle), so per-stride scores are computed independently by
+windowing the same left/right elbow-angle-range calculation into each combined
+footstrike-to-footstrike interval (the same segmentation `computeVerticalOscillation` uses), skipping
+any window with fewer than 2 visible samples for either arm.
+
+## Cadence over-counting fix (cross-foot false-positive footstrikes)
+
+A user reported an implausible ~250spm cadence reading (even elite distance-running cadence
+rarely exceeds the low 200s). Root cause, confirmed with a synthetic reproduction before touching
+any code (`strides.test.ts`'s "does not let a spurious close cross-foot detection collapse the
+merged interval" test — written first, verified it failed against the old code, then fixed):
+`detectFootstrikes`'s `minSeparationMs` (300ms, "~200 strides/min per leg ceiling") only
+constrains peaks *within one foot's own signal*. A spurious secondary peak — pose-tracking jitter
+producing a second, smaller-but-still-prominence-qualifying bump well away from that foot's own
+real strikes — could survive that per-foot check yet land almost exactly when the *other* foot
+had a genuine strike. `detectAllFootstrikes`/`detectAllStrides` then just merged-and-sorted both
+feet with no further check, so that pairing collapsed into a near-zero-ms gap in the combined
+stream. `computeCadence` averages every gap in that stream — a handful of near-zero gaps pulls
+the average interval down and the reported steps/min up, exactly the inflation reported.
+
+Fix: both `detectAllFootstrikes` and `detectAllStrides` now pass their merged, sorted stream
+through a new shared `mergeCrossFootFiltered` helper that drops any event landing less than half
+of `minSeparationMs` after the previously *kept* event, regardless of which foot it came from.
+Half is physically motivated, not an arbitrary extra constant: if one leg's own fastest plausible
+turnover is `minSeparationMs` apart, the fastest the *two* legs could ever alternate (perfectly
+out of phase) is half that. `detectAllStrides` needed the identical fix — it has the same
+merge-without-cross-foot-check shape, and a collapsed gap there would have corrupted
+`computeGroundContactTime`/`computeFlightTime` and the stride-diagnostics debug table the same
+way. `detectFootstrikes`/`detectStrides` (the single-foot functions) are unchanged — the bug was
+only ever in how the two feet's streams get combined.
+
+Verified via Vitest (122 tests passing, including the new regression test) plus `npm run lint` and
+`npm run build`. Not yet re-verified against the user's actual footage — ask them to re-check the
+report (or the `/pose-poc` stride-diagnostics table, which will now also no longer show
+near-zero `Δ prev (ms)` rows) once they re-test.
+
 ## Product & architectural constraints (do not violate)
 
 - **Zero infrastructure cost is a hard constraint.** All pose inference must run client-side.
@@ -494,3 +545,48 @@ Key rules to hold to when building real UI:
 - Voice is plain and coaching, not corporate SaaS copy — e.g. "Overstriding on your left foot,"
   not "Overstride event detected: LEFT." Errors explain what happened and what to do next, never
   a raw exception string.
+
+### Local divergence: dark theme + `--energy` accent (not in the shared tokens doc)
+
+A "revamp the UI for the sport's nuance" request went through two iterations — both **app-local**,
+confirmed with the user, not edited into `running-brand-design-tokens.md` (the separate Volt and
+Fast product also depends on that doc; this keeps that product's identity from silently changing
+without its own team's sign-off). If the two products' identities get reconciled later, this
+section is what to fold back in (or drop, if the shared decision differs).
+
+**Round 1 (superseded)**: added `--energy: #5c6b00`, a deepened chartreuse, as the default
+headline-number color, keeping the light paper/ink base otherwise unchanged. Follow-up feedback
+("the background still the same like creamy-theme... we need a strong, sport-defined UI") made
+clear this didn't go far enough — kept here only as history, not the current state.
+
+**Round 2 (current)**: a full dark-theme flip of `globals.css`'s `:root` values. Variable NAMES
+are unchanged (`--ink` is still "primary text," `--paper` is still "background") so every
+`bg-paper`/`text-ink`/etc. class across the codebase kept working with a zero-touch rename — only
+the hex VALUES inverted. Read each name as its role, not its literal English meaning.
+
+| Token | Old (light) | New (dark) | Why |
+|---|---|---|---|
+| `--ink` (text) | `#12130f` | `#f2efe6` | was near-black text, now near-white |
+| `--paper` (background) | `#f2efe6` | `#15140f` | was cream, now near-black (warm-tinted, not cold blue-black — keeps the earthy family) |
+| `--stone` (muted text) | `#b8b2a1` | unchanged | already clears 8.71:1 against the new dark background, no change needed |
+| `--rust` (warning accent) | `#b5502e` | `#ff7a4d` | the original was tuned as dark text on light paper — ~3.65:1 against the new dark background, brightened to 7.15:1 |
+| `--field` (good/on-track accent) | `#3c4a2e` | `#8fbf5a` | the original computed to ~1.9:1 against the new dark background — would have been functionally invisible; brightened to 8.58:1 |
+| `--energy` (headline-number accent) | `#5c6b00` | `#d4ff4f` | this is the *original* neon-lime pitch from Round 1, rejected then for failing contrast on light paper (~1:1) — on a dark background the same bright color clears 16:1. No new color needed, just the surface it was always right for |
+| `--line` (hairline borders) | `#dad5c6` | `#2a281f` | deliberately LOW contrast (~1.25:1) against the new background, matching the light theme's own ~1.28:1 line-vs-paper subtlety — hairlines read as felt, not read, so this intentionally does NOT follow the 4.5:1 text-contrast rule the other rows do |
+
+Every ratio above was computed with a WCAG relative-luminance script before use, not eyeballed —
+see `globals.css`'s own comment block for the same table inline with the code.
+
+Also added `color-scheme: dark` on `body` so native widgets (the `<video>` control bar, the hidden
+file-input's OS picker, scrollbars) render their dark variant instead of a jarring light default.
+
+**Known side effect, not a bug**: `/pose-poc` is documented elsewhere in this file as deliberately
+unstyled — but it was always implicitly inheriting its base background/text color from this same
+global `body` rule (its own inline styles only set text/border colors, never the page background),
+so it now renders dark too. Verified it's still fully legible (checked via screenshot) — if it
+ever isn't, that page's own hardcoded inline hex colors are the thing to fix, not this token file.
+
+Typography (Oswald/Inter/JetBrains Mono), layout, and motion are unchanged in both rounds — the
+user picked a dark flip of the existing identity over two bigger alternatives a design-system
+search also surfaced (a saturated red/gold "stadium" direction, and swapping to Barlow Condensed)
+— both still available as a reference if asked for again, but don't revisit unprompted.

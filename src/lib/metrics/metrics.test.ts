@@ -106,6 +106,21 @@ describe("computeCadence", () => {
   it("returns null with fewer than two footstrikes", () => {
     expect(computeCadence([])).toBeNull();
   });
+
+  it("converts each stride interval to its own instantaneous steps/min", () => {
+    const session = buildStrideSession({});
+    const result = computeCadence(session);
+    expect(result).not.toBeNull();
+    expect(result!.perStrideStepsPerMinute).toHaveLength(result!.sampleCount);
+    for (const spm of result!.perStrideStepsPerMinute) {
+      // Same ~300ms combined-strike interval as the average above, read
+      // per-interval instead -> a wider tolerance than the averaged value,
+      // since an individual interval carries the full frame-grid
+      // quantization jitter that averaging over 9 of them smooths out.
+      expect(spm).toBeGreaterThan(150);
+      expect(spm).toBeLessThan(260);
+    }
+  });
 });
 
 describe("computeVerticalOscillation", () => {
@@ -251,6 +266,12 @@ describe("computeHipDrop", () => {
     expect(result).not.toBeNull();
     expect(result!.sampleCount).toBe(10);
     expect(result!.hipDropDegrees).toBeCloseTo(expectedDegrees, 6);
+    // Frame-invariant fixture -> every individual sample matches the
+    // average exactly too, not just the aggregate.
+    expect(result!.samples).toHaveLength(10);
+    for (const sample of result!.samples) {
+      expect(sample).toBeCloseTo(expectedDegrees, 6);
+    }
   });
 
   it("returns null with no detected footstrikes", () => {
@@ -410,6 +431,68 @@ describe("computeArmSwingSymmetry", () => {
     // Right got both samples -> a real range (180 -> 90 = 90deg).
     expect(result!.rightSampleCount).toBe(2);
     expect(result!.rightRangeOfMotionDegrees).toBeCloseTo(90, 6);
+  });
+
+  // buildStrideSession re-derives shoulders *after* augment runs, at a
+  // fixed offset above the (also fixed, default) hips — {-0.1,-0.5,0} and
+  // {0.1,-0.5,0} here, regardless of what augment sets. These tests place
+  // each elbow directly below its own final shoulder position (same
+  // relative offset for both sides, so the elbow->shoulder vector is
+  // identical left vs. right despite the different absolute x), then move
+  // the wrist by the *same* relative offset from each elbow — making
+  // left/right elbow angle identical at every instant by construction,
+  // not just approximately.
+  const LEFT_SHOULDER_FIXED = { x: -0.1, y: -0.5, z: 0 };
+  const RIGHT_SHOULDER_FIXED = { x: 0.1, y: -0.5, z: 0 };
+
+  it("keeps per-stride symmetry scores near 100 when both arms swing identically", () => {
+    const session = buildStrideSession({
+      augment: (points, t) => {
+        // Fast swing (80ms period) relative to the ~300ms stride interval,
+        // so several full cycles land inside every stride window.
+        const rad = (2 * Math.PI * t) / 80;
+        const leftElbow = { x: LEFT_SHOULDER_FIXED.x, y: LEFT_SHOULDER_FIXED.y + 0.5, z: 0 };
+        const rightElbow = { x: RIGHT_SHOULDER_FIXED.x, y: RIGHT_SHOULDER_FIXED.y + 0.5, z: 0 };
+        const dx = Math.cos(rad) * 0.3;
+        const dy = Math.sin(rad) * 0.3;
+        points[POSE_LANDMARK.LEFT_ELBOW] = leftElbow;
+        points[POSE_LANDMARK.RIGHT_ELBOW] = rightElbow;
+        points[POSE_LANDMARK.LEFT_WRIST] = { x: leftElbow.x + dx, y: leftElbow.y + dy, z: 0 };
+        points[POSE_LANDMARK.RIGHT_WRIST] = { x: rightElbow.x + dx, y: rightElbow.y + dy, z: 0 };
+      },
+    });
+    const result = computeArmSwingSymmetry(session);
+    expect(result).not.toBeNull();
+    expect(result!.perStrideSymmetryScores.length).toBeGreaterThan(0);
+    for (const score of result!.perStrideSymmetryScores) {
+      expect(score).toBeCloseTo(100, 6);
+    }
+  });
+
+  it("drops per-stride symmetry scores toward 0 when only one arm swings", () => {
+    const session = buildStrideSession({
+      augment: (points, t) => {
+        const rad = (2 * Math.PI * t) / 80;
+        const leftElbow = { x: LEFT_SHOULDER_FIXED.x, y: LEFT_SHOULDER_FIXED.y + 0.5, z: 0 };
+        const rightElbow = { x: RIGHT_SHOULDER_FIXED.x, y: RIGHT_SHOULDER_FIXED.y + 0.5, z: 0 };
+        points[POSE_LANDMARK.LEFT_ELBOW] = leftElbow;
+        points[POSE_LANDMARK.RIGHT_ELBOW] = rightElbow;
+        // Left arm swings; right arm holds a constant wrist position (zero
+        // range of motion in every window).
+        points[POSE_LANDMARK.LEFT_WRIST] = {
+          x: leftElbow.x + Math.cos(rad) * 0.3,
+          y: leftElbow.y + Math.sin(rad) * 0.3,
+          z: 0,
+        };
+        points[POSE_LANDMARK.RIGHT_WRIST] = { x: rightElbow.x + 0.3, y: rightElbow.y, z: 0 };
+      },
+    });
+    const result = computeArmSwingSymmetry(session);
+    expect(result).not.toBeNull();
+    expect(result!.perStrideSymmetryScores.length).toBeGreaterThan(0);
+    for (const score of result!.perStrideSymmetryScores) {
+      expect(score).toBeLessThan(10);
+    }
   });
 });
 
