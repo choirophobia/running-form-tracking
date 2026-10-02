@@ -18,16 +18,17 @@ concept, not a finished product.** Read this table before assuming a feature exi
 |---|---|---|
 | 1 | Client-side pose extraction + skeleton overlay | ✅ Built |
 | 2 | FPS detection with a tiered confidence gate | ✅ Built |
-| 3 | Metric computation (cadence, vertical oscillation, overstride, hip drop, arm swing symmetry, landing form) | ✅ Built, camera-angle-aware |
+| 3 | Metric computation — cadence, vertical oscillation, overstride, hip drop, arm swing symmetry, landing form, ground contact time, flight time (8 metrics) | ✅ Built, camera-angle-aware, leg-length-normalized |
 | 4 | Database schema + API routes (Supabase) | ✅ Built, **not wired to any UI yet** |
-| 5 | Real report UI, styled to the design system | ⬜ Not started |
+| 5 | Real report UI, styled to the design system | ✅ Built — `/` |
 | 6 | History sidebar (past sessions, progress over time) | ⬜ Not started |
 | 7 | Recommendations engine (cited exercises per flagged metric) | ⬜ Not started |
 
-Everything that exists today lives on one unstyled developer page, `/pose-poc` — there is no
-real app UI, no sign-up/login flow, and nothing persists anywhere yet (Batch 4's database exists
-and works, but the browser page doesn't call it). The `/pose-poc` page is a proof of concept for
-validating the client-side pipeline, not a preview of the final product.
+`/` is the real, styled product page (upload → analyze → report). There's still no sign-up/login
+flow and nothing persists anywhere yet — Batch 4's database exists and works, but the browser
+page doesn't call it. `/pose-poc` is a separate, deliberately unstyled developer page running the
+exact same pipeline, kept around for debugging: it adds a per-stride diagnostics table (raw
+cadence intervals and landing-form geometry) that `/` intentionally doesn't show.
 
 ## Try it yourself
 
@@ -37,21 +38,29 @@ npx supabase start   # local Postgres/Auth/Storage via Docker — see "Local Sup
 npm run dev
 ```
 
-Open `http://localhost:3000/pose-poc`, upload a video of yourself running, and let it play.
+Open `http://localhost:3000`, upload a video of yourself running, and let it play. (Prefer the raw
+numbers and a per-stride debug table instead of the styled report? Use `http://localhost:3000/pose-poc` —
+same pipeline, deliberately unstyled.)
 
 What you'll see:
 1. **FPS check** — reads the video's real frame rate before anything else runs, and gates
    accordingly: full confidence at ≥120fps, reduced confidence at 60-119fps, or blocked below
    60fps (with an option to continue anyway, minus the landing-form metric).
 2. **Skeleton overlay** — MediaPipe's pose model tracks your joints live on top of the video.
-3. **Computed metrics** — pause the video (or let it finish) and a panel appears below it with
-   cadence, vertical oscillation, overstride, hip drop, arm swing symmetry, and landing form,
-   each with a confidence label or an honest "not enough data" instead of a guessed number.
+   Playback runs at half speed so client-side detection has enough wall-clock time to keep up
+   with fast motion without dropping frames — `video.currentTime` (and every metric built on it)
+   is unaffected, this is purely a frame-budget fix.
+3. **Computed metrics** — pause the video (or let it finish) and a report appears with all eight
+   metrics: cadence, vertical oscillation, overstride, hip drop, arm swing symmetry, landing
+   form, ground contact time, and flight time — each with a confidence label or an honest "not
+   enough data" instead of a guessed number.
 
 There's also a "Camera angle detected" line — the metrics module infers whether your video is
 side-on or front/rear-facing from the pose data itself, and disables hip drop entirely on a
 side-on shot rather than showing a meaningless number (hip drop genuinely can't be measured from
-the side — the two hip landmarks nearly overlap when viewed edge-on).
+the side — the two hip landmarks nearly overlap when viewed edge-on). Overstride and vertical
+oscillation are also reported as a percentage of your own estimated leg length, so the numbers
+are comparable across runners of different heights, not just raw cm.
 
 ## Why it can be free to run
 
@@ -74,7 +83,9 @@ people use it. See `running-form-saas-prd-v0.md` Section 4 for the full reasonin
 | Target hosting | Vercel (frontend + API routes) + Supabase, both free-tier |
 
 Both MediaPipe and mediainfo.js are loaded from a CDN at runtime rather than bundled — see
-`CLAUDE.md` for why (a real bug this caused, and how it was fixed and verified).
+`CLAUDE.md` for why (a real bug this caused, and how it was fixed and verified). Pose detection
+uses MediaPipe's **`full`** model variant (not `lite`) for better accuracy on small/fast-moving
+points like the heel and toe — `lite` was visibly misaligned with the shoe on real footage.
 
 ## Local development
 
@@ -139,16 +150,19 @@ npm run build
 ```
 src/
   app/
-    pose-poc/           # the one developer page tying Batches 1-3 together
-    api/analyses/        # Batch 4: save/list/get analyses (not wired to any UI)
+    page.tsx              # Batch 5: the real, styled report UI at "/"
+    pose-poc/              # unstyled developer page, same pipeline + a debug diagnostics table
+    api/analyses/           # Batch 4: save/list/get analyses (not wired to any UI)
+  hooks/
+    useRunningFormAnalysis.ts  # shared pipeline (fps gate, pose loop, metrics) used by both pages
   lib/
     fps-detection.ts     # Batch 2: frame-rate detection + tiered gate
     metrics/              # Batch 3: pose-frame -> running-form metrics
       geometry.ts          # generic 3D vector/angle math
-      pose-landmarks.ts    # MediaPipe landmark indices, types, visibility filtering
-      strides.ts            # footstrike detection (shared by several metrics)
-      camera-angle.ts       # infers side vs. front/rear framing from pose data
-      metrics.ts             # the six metric-computation functions
+      pose-landmarks.ts    # MediaPipe landmark indices, types, world/normalized landmark handling
+      strides.ts            # footstrike + toe-off detection (shared by several metrics)
+      camera-angle.ts       # infers side vs. front/rear framing and direction of travel from pose data
+      metrics.ts             # the eight metric-computation functions
     supabase/             # Batch 4: request auth, validation, pagination
 supabase/
   migrations/            # database schema (profiles, analyses) + Row Level Security
@@ -175,7 +189,9 @@ implementation decisions above:
 
 ## Status of this README
 
-Written to reflect the codebase as of the camera-angle/visibility-filtering and API
-pagination/validation enhancements on top of Batches 1-4. If you're reading this much later and
-something here looks stale, `CLAUDE.md`'s "Project status" section and the git log are more
-current than this file's prose.
+Written to reflect the codebase through Batch 5 (the real report UI at `/`) plus the
+ground-contact-time/flight-time metrics, the `full` pose model switch, the playback-rate fix, and
+the fix that made vertical oscillation and signed overstride actually work on real footage
+(tracked via normalized rather than world landmarks — see `CLAUDE.md`). If you're reading this
+much later and something here looks stale, `CLAUDE.md`'s "Project status" section and the git log
+are more current than this file's prose.

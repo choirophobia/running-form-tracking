@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { allVisible, isVisible, landmark, MIN_LANDMARK_VISIBILITY, type PoseFrame } from "./pose-landmarks";
+import {
+  allVisible,
+  isVisible,
+  landmark,
+  MIN_LANDMARK_VISIBILITY,
+  tryNormalizedLandmark,
+  type PoseFrame,
+} from "./pose-landmarks";
 
 describe("isVisible", () => {
   it("treats a landmark with no visibility field as visible", () => {
@@ -36,5 +43,23 @@ describe("landmark", () => {
   it("throws on a missing index rather than returning undefined silently", () => {
     const frame: PoseFrame = { timestampMs: 0, worldLandmarks: [] };
     expect(() => landmark(frame, 23)).toThrow(/missing landmark index 23/);
+  });
+});
+
+describe("tryNormalizedLandmark", () => {
+  it("returns the point when present", () => {
+    const point = { x: 0.5, y: 0.3, z: 0 };
+    const frame: PoseFrame = { timestampMs: 0, worldLandmarks: [], normalizedLandmarks: [point] };
+    expect(tryNormalizedLandmark(frame, 0)).toBe(point);
+  });
+
+  it("returns null (not throwing) when normalizedLandmarks is entirely absent", () => {
+    const frame: PoseFrame = { timestampMs: 0, worldLandmarks: [] };
+    expect(tryNormalizedLandmark(frame, 23)).toBeNull();
+  });
+
+  it("returns null when normalizedLandmarks is present but missing that index", () => {
+    const frame: PoseFrame = { timestampMs: 0, worldLandmarks: [], normalizedLandmarks: [] };
+    expect(tryNormalizedLandmark(frame, 23)).toBeNull();
   });
 });

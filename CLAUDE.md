@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Batch 1 (pose-detection PoC), Batch 2 (fps detection + tiered gate), and Batch 3 (metric
-computation functions) are done and wired together in one PoC page, `src/app/pose-poc/page.tsx`.
-Batch 4 (Supabase schema + API routes) is also done — schema + backend only, **not wired into
-the pose-poc page**: computed metrics don't get saved anywhere yet, there's no sign-up/sign-in UI,
-and history/report UI (Batches 5-6) don't exist. Read `running-form-saas-prd-v0.md` and
+Batches 1-4 are done (pose detection, fps gate, metric computation, Supabase schema + API —
+see their sections below). Batch 5 (report UI) is also done: `src/app/page.tsx` is now the real
+product page at `/`, styled per `running-brand-design-tokens.md`. It still isn't wired to Batch
+4's API — **computed metrics don't get saved anywhere yet**, there's no sign-up/sign-in UI, and
+history (Batch 6) doesn't exist. Read `running-form-saas-prd-v0.md` and
 `running-brand-design-tokens.md` in full before extending this — they are the source of truth,
 not this summary.
 
@@ -18,10 +18,11 @@ Recommended build order (from the PRD, Section 11):
 1. Client-side pose extraction + skeleton overlay proof of concept — **done**
 2. FPS detection with the tiered confidence gate — **done**
 3. Metric computation functions, with unit tests against known reference angles — **done**,
-   wired into the pose-poc page so computed metrics are visible against real footage
+   wired into `/` (and the pose-poc dev page) so computed metrics are visible against real footage
 4. Supabase schema + API routes — **done** (schema + `/api/analyses` routes only; not wired
    into any UI yet — see the Batch 4 section below)
-5. Report UI using the design tokens
+5. Report UI using the design tokens — **done** (see the Batch 5 section below) — no hero
+   efficiency score (PRD Section 12 open decision) and no recommendations (Batch 7) yet
 6. History sidebar
 7. Recommendations engine with the curated citation/video table
 
@@ -52,32 +53,63 @@ Supabase instance — it throws immediately with a clear message if `npx supabas
 been run / `.env.local` isn't populated. Run `npx supabase start` before `npm test` if you've
 stopped it.
 
-## Batch 1+2+3: pose detection + fps gate + metrics proof of concept
+## Batch 1+2+3: pose detection + fps gate + metrics pipeline
 
-`src/app/pose-poc/page.tsx` — a standalone page (not the final app UI), still intentionally
-unstyled (no design-tokens pass yet), no persistence. On file select it runs the Batch 2 fps gate
-first; only videos that pass (or are explicitly continued past) reach the Batch 1 pose overlay,
-which in turn feeds the Batch 3 metrics (see below).
+`src/hooks/useRunningFormAnalysis.ts` is the shared pipeline — fps gate, pose detection/overlay,
+metric computation — used by **both** `src/app/page.tsx` (the real report UI, Batch 5) and
+`src/app/pose-poc/page.tsx` (a standalone dev harness for the same pipeline, deliberately
+unstyled, kept around for quick end-to-end testing without the real UI's styling getting in the
+way). This used to live inline in the pose-poc page only; extracted once a second consumer
+(Batch 5) needed the same logic, so a bug fix only has to happen once. If you're touching fps
+gating, pose overlay, or metric collection, this file — not either page — is almost certainly
+where the change belongs.
 
-**Batch 1 — pose overlay.** Upload a local video, it plays in a `<video>` element, and a
-`<canvas>` overlay draws landmarks/connectors per frame. The animation loop
-(`startPoseLoop`/`cancelScheduledFrame` in that file) lives at module scope, not inside the
-component — keep it there: it's imperative ref-driven code that intentionally calls
-`performance.now()` outside render, which trips React Compiler's purity lint if nested inside
-the component body. Prefers `requestVideoFrameCallback` (fires once per actual decoded frame)
-over a plain `requestAnimationFrame` loop, falling back to rAF where unsupported.
+**Batch 1 — pose overlay.** A video plays in a `<video>` element, and a `<canvas>` overlay draws
+landmarks/connectors per frame. The animation loop (`startPoseLoop`/`cancelScheduledFrame` in the
+hook file) lives at module scope, not inside the hook — keep it there: it's imperative ref-driven
+code that intentionally calls `performance.now()` outside render, which trips React Compiler's
+purity lint if nested inside a component/hook body. Prefers `requestVideoFrameCallback` (fires
+once per actual decoded frame) over a plain `requestAnimationFrame` loop, falling back to rAF
+where unsupported.
+
+Detection is **synchronous** inside that per-frame callback — it blocks until
+`detectForVideo` returns before scheduling the next frame — but the `<video>` element's own
+playback keeps advancing in real time regardless of how long that takes. If inference is slower
+than the real-time gap between frames (plausible with the `full` model switch above, especially
+during fast motion), frames get silently skipped: the overlay visibly lags the real movement,
+and footstrike detection loses samples too, not just the visuals — this was a second real,
+user-reported symptom of the same model-speed tradeoff, not a separate bug. Fixed in
+`handleLoadedMetadata` by setting `video.playbackRate = ANALYSIS_PLAYBACK_RATE` (0.5) before
+playback can start, giving detection roughly 2x the real wall-clock time per actual video frame.
+`video.currentTime` still means the same thing regardless of playback rate, so `PoseFrame`
+timestamps (and everything timing-based built on them) are unaffected — this is purely a
+"give detection enough wall-clock time" fix, not a change to what's measured. Both `/` and
+`/pose-poc` tell the user playback is intentionally slowed, so it doesn't read as a glitch.
 
 Uses `@mediapipe/tasks-vision` (WASM, runs fully in-browser — no server round-trip), loading
 the model from Google's hosted CDN (`storage.googleapis.com/mediapipe-models`) at runtime, not
-bundled locally.
+bundled locally. Uses the **`full`** model variant, not `lite` — `lite` was visibly
+misaligned with the shoe on real footage (a user-reported observation, not a guess), which fed
+directly into landing-form misclassification and probably some of the cadence over-counting too
+(see `computeStrideDiagnostics`' doc comment in metrics.ts). `full` costs download size (~9.4MB
+vs. ~5.8MB, one-time/cached) and some inference speed vs. `lite`, but is meaningfully more
+accurate, especially on small/fast-moving points like heel and toe. `heavy` would be more
+accurate still but risks not staying real-time — deliberately not used.
+
+Model-load and fps-detection failures show a clean, friendly message (see
+`running-brand-design-tokens.md`'s Voice section: "never a raw exception string") — the raw
+technical error goes to `console.error` instead. This was a real bug caught by actually running
+the report page in a browser (a headless one, via a throwaway Playwright script — no GPU
+available there, so the pose model's GPU delegate reliably fails to initialize, which is exactly
+what first surfaced the raw-exception-string leak), not something found by reading the code.
 
 **Batch 2 — fps gate.** `src/lib/fps-detection.ts` implements PRD Section 5: `detectFps(file)`
 reads the container's encoded frame rate via `mediainfo.js`, falling back to empirical frame
 counting (via `requestVideoFrameCallback` on a hidden video element) if metadata is missing,
 malformed, or outside ~15–480fps. `classifyFpsTier(fps)` sorts the result into the tiered gate
-(full ≥120fps / reduced 60–119fps / blocked <60fps). The pose-poc page wires this in as an
-`FpsGateState` that blocks the video from loading at all on a "blocked" result, offering a
-"continue without landing form" button that proceeds with `landingFormAvailable: false`.
+(full ≥120fps / reduced 60–119fps / blocked <60fps). The hook wires this in as an `FpsGateState`
+that blocks the video from loading at all on a "blocked" result, offering a "continue without
+landing form" button that proceeds with `landingFormAvailable: false`.
 
 `mediainfo.js` is loaded from jsdelivr at runtime, **not** imported as an npm value import — its
 package build (via the `module`/`import` export conditions) resolves to emscripten glue that
@@ -89,10 +121,6 @@ the ESM bundle from a *non-literal* URL variable (so no bundler statically resol
 an explicit `locateFile` pointing at the correct `dist/` path. Verified end-to-end against
 generated 30fps/150fps test clips before relying on it — don't drop the `locateFile` override or
 revert to a static `import "mediainfo.js"` without re-checking both failure modes.
-
-Once pose extraction, fps gating, and metrics are validated against a real running video, this
-page's logic becomes the basis for the real upload/analysis flow — don't build further batches
-on top of it until that validation happens.
 
 ## Batch 3: metric computation functions
 
@@ -190,6 +218,23 @@ metrics" button. Results render in a `MetricsPanel` below the video, one row per
     foot-contact timing needs the same frame-rate headroom as catching the strike-instant frame
     does — this pairing (fps sensitivity + a `confidence` field) is why they reuse
     `LandingFormConfidence` rather than inventing a parallel type.
+  - `computeStrideDiagnostics` (new) — **not** a product metric, a debug/audit tool: one row per
+    detected stride (both feet, chronological) with the raw numbers behind cadence (each strike's
+    gap from the previous one in the combined stream — exactly what `computeCadence` averages)
+    and landing form (raw heel/toe delta and classification, **not** fps-tier-gated like
+    `computeLandingForm` — shows the underlying geometry regardless). Added after a user reported
+    a cadence that looked too high and a landing-form frame that looked misclassified; wired into
+    `useRunningFormAnalysis`'s `metrics.strideDiagnostics` and rendered as a table on the
+    pose-poc page only (`StrideDiagnosticsTable`) — **not** on the real `/` report page, matching
+    the existing pose-poc-is-the-debug-tool / `/` -is-the-product split. Built specifically so a
+    human can cross-check a detected strike's timestamp and classification against what that
+    instant in the source video actually shows, rather than guessing at a fix blind. Leading
+    hypothesis for over-counted cadence: `detectAllFootstrikes` enforces a minimum separation
+    *within* each foot's own signal but not *across* feet in the merged stream, so a noisy/
+    spurious detection on one foot landing close to a real detection on the other foot drags the
+    averaged interval down (and so the computed cadence up) — the diagnostic table's
+    interval-from-previous column is exactly what would expose that. Not yet confirmed against
+    real data; don't assume this is the fix without checking the table first.
 
 Every metric function is unit-tested (`*.test.ts` next to its source) against synthetic
 `PoseFrame` sequences built to have an exactly-derivable expected value — e.g. overstride and
@@ -203,8 +248,8 @@ informally spot-checked, not empirically validated against a labeled reference d
 
 **Explicitly out of scope so far** (don't add speculatively): the composite efficiency score
 (PRD Section 7's "one hero number") — its weighting formula is still an open decision per PRD
-Section 12; the design-tokens styling pass (Batch 5). (Persistence is no longer out of scope —
-see Batch 4 below — but isn't wired to this page yet.)
+Section 12. (Persistence and the design-tokens styling pass are no longer out of scope — see the
+Batch 4 and Batch 5 sections below — but persistence isn't wired to any UI yet.)
 
 ## Batch 4: Supabase schema + API routes
 
@@ -260,9 +305,102 @@ Also manually smoke-tested with real `curl` requests against the running dev ser
 the test suite) before considering this done — same verify-before-declaring-done discipline as
 Batch 2's mediainfo.js CDN bug.
 
-**Explicitly out of scope so far**: any UI (sign-up/sign-in page, saving a pose-poc session,
-history sidebar); video upload to Storage (`video_storage_path` column exists, nothing writes to
-it); the composite `score` column (same open decision as Batch 3).
+**Explicitly out of scope so far**: wiring this into any UI (the Batch 5 report page doesn't call
+it — sign-up/sign-in page, saving an analysis, history sidebar are all still missing); video
+upload to Storage (`video_storage_path` column exists, nothing writes to it); the composite
+`score` column (same open decision as Batch 3).
+
+## Batch 5: report UI
+
+`src/app/page.tsx` is now the real product page at `/` — not a placeholder, this replaces
+`create-next-app`'s default homepage entirely. Uses `useRunningFormAnalysis` (see the Batch 1+2+3
+section above) for the pipeline; this file is purely presentation, styled per
+`running-brand-design-tokens.md`.
+
+- **No hero number.** The design tokens call for "one hero number per screen" (the efficiency
+  score, PRD Section 7) — not built here on purpose: its weighting formula is still an open
+  decision (PRD Section 12), and showing *a* number would mean inventing one, not computing one.
+  The metric grid shows all eight metrics (the original six plus the two Ochy-inspired additions)
+  at equal visual weight instead. Don't add a hero number without that formula being decided
+  first.
+- **No recommendations section.** PRD Section 7's recommendations (one entry per flagged metric,
+  with citations) are Batch 7 — there's no flagging logic yet to know which metric to flag, so
+  there's nothing to show.
+- **Typography**: `src/app/layout.tsx` loads three `next/font/google` fonts matching the design
+  tokens' three-typeface system — Oswald (`--font-display`, condensed/high-contrast, for big
+  numbers and section titles only), Inter (`--font-sans`, body/UI), JetBrains Mono
+  (`--font-mono`, numeric readouts only). Each metric's primary value uses the display face at a
+  consistent size — the tokens doc names "cadence" as an example of what gets display-face
+  treatment, so this isn't a stretch of "big numbers... used for... section titles only"; "one
+  hero number" is a size-hierarchy rule (nothing is blown up bigger than the rest), not a
+  typeface restriction.
+- **Colors**: `src/app/globals.css` defines the full token palette as CSS variables plus a
+  Tailwind v4 `@theme inline` block (`bg-paper`, `text-ink`, `border-line`, `text-rust`,
+  `text-field`, etc.) — one committed light aesthetic, no dark-mode variant, since the tokens doc
+  doesn't define one. Rust is used only for the one state with an actual documented reason to
+  flag it (overstride landing ahead of center of mass — the Voice section's own example sentence,
+  "Overstriding on your left foot," is about exactly this) and for the fps-blocked/reduced tier
+  colors already established in Batch 2. Metric values with no validated "good/bad" threshold
+  stay neutral ink — don't invent accent-color judgments for metrics without a PRD-approved
+  threshold backing them.
+- **Motion**: limited to the one moment the tokens call for — the report revealing itself when
+  metrics finish computing (a `fade-in` keyframe in `globals.css`, applied only to `MetricGrid`,
+  which only ever mounts once metrics exist). Nothing animates on the upload/analyze steps.
+- **Numbered steps** (`Step` component): used because upload → analyze → report is genuinely
+  sequential, matching the tokens' "numbered steps only where the content is genuinely
+  sequential" rule — not used decoratively elsewhere.
+
+Verified in a real (headless, via a throwaway Playwright script) browser, not just `npm run
+build` — computed fonts/colors read back correctly (`getComputedStyle`), and this pass is what
+caught the raw-exception-string bug described in the Batch 1+2+3 section above. Screenshot
+reviewed, not just asserted.
+
+## Post-Batch-5 fix: vertical oscillation was always 0 (world vs. normalized landmarks)
+
+`computeVerticalOscillation` always returned ~0cm on real footage. Root cause (confirmed via
+MediaPipe's own docs, not guessed): **world landmarks re-center their coordinate origin to the hip
+midpoint on every single frame.** That makes world landmarks excellent for same-frame/relative
+measurements (limb lengths, joint angles, one landmark vs. another) but structurally unable to
+track how a joint's *own* position changes *across* frames — the hip's own world-Y is always ~0 by
+construction, so a function reading `hip.y` over time can never see bounce. This isn't a
+peak-detection bug; it's the wrong coordinate space for the measurement.
+
+The same bug silently broke `inferDirectionOfTravelAxis`/`inferTravelSign` (signed overstride) —
+their unit tests passed because synthetic fixtures artificially moved the hip over time, which
+isn't how real MediaPipe world-landmark output behaves.
+
+**Fix**: `PoseFrame` (`pose-landmarks.ts`) gained an optional `normalizedLandmarks` field —
+`PoseLandmarkerResult.landmarks[0]`, genuine absolute image-plane x/y (not recentered), fed
+alongside `worldLandmarks` from `useRunningFormAnalysis.ts`'s detection loop. `z` on normalized
+landmarks is still hip-relative depth, same as world — never treat it as absolute. A new
+`tryNormalizedLandmark()` accessor returns `null` rather than throwing when it's absent (older/
+synthetic frames can omit it).
+
+- `computeVerticalOscillation` (`metrics.ts`) now tracks normalized hip-mid Y across frames instead
+  of world hip Y. Since normalized units are dimensionless (not meters), a new
+  `estimateLegLengthNormalized2D` helper measures the same leg-length reference distance in
+  normalized 2D (x/y only, z excluded) as `estimateLegLengthMeters` does in world meters; the ratio
+  between the two gives a real "meters per normalized unit" calibration factor. Returns `null` (not
+  a number derived from nothing) when frames lack normalized data or leg length can't be estimated
+  in both spaces.
+- `inferDirectionOfTravelAxis`/`inferTravelSign` (`camera-angle.ts`) now read normalized hip-mid X
+  instead of world hip X/Z. `TravelAxis` shrank from `"x" | "z"` to just `"x"` — world-z's old role
+  (a second candidate axis) has no normalized equivalent, since normalized Y is already vertical
+  oscillation's signal and normalized Z is still hip-relative depth. The old `MIN_DOMINANT_AXIS_RATIO`
+  (x-range vs. z-range) is replaced by a body-scale-relative threshold: hip-mid x range must exceed
+  ~3x the average normalized hip width to count as real travel rather than sway/jitter, so the
+  threshold self-scales with how zoomed-in the shot is. `inferTravelSign` dropped its `axis`
+  parameter (only one axis exists now). `computeOverstride`'s magnitude calculation is unchanged —
+  it's a same-frame world-landmark measurement, unaffected by this issue; only the *sign* source
+  changed.
+- `inferCameraAngle`, `computeHipDrop`, `computeCadence`/footstrike detection, `estimateLegLengthMeters`,
+  `computeArmSwingSymmetry`, `computeGroundContactTime`/`computeFlightTime`, `computeLandingForm` are
+  all same-frame/relative measurements and were **not** affected by this bug — confirmed by auditing
+  every metric function against the world-landmark-origin-reset behavior before touching any code.
+
+Verified via Vitest (118 tests passing, including new fixtures for `tryNormalizedLandmark`, the
+rewritten `inferDirectionOfTravelAxis`/`inferTravelSign`, and vertical-oscillation calibration) plus
+`npm run lint` and `npm run build`.
 
 ## Product & architectural constraints (do not violate)
 
@@ -341,7 +479,8 @@ per-metric inline in components.
 
 Full spec: `running-brand-design-tokens.md`. This is shared with the "Volt and Fast" rebuild,
 so both products must read as one identity — treat it as the single source of truth for the
-frontend build, not a separate visual pass. Not applied yet to the Batch 1 PoC page (see above).
+frontend build, not a separate visual pass. Applied to `/` (Batch 5, see that section above) —
+**not** applied to `/pose-poc`, which stays deliberately unstyled as a dev harness.
 
 Key rules to hold to when building real UI:
 - Only two accent colors (`--rust`, `--field`), never both in the same component — rust means

@@ -52,25 +52,62 @@ export interface PoseFrame {
    * All 33 BlazePose points must be present — callers should only push
    * frames where a pose was actually detected.
    *
+   * CONFIRMED (MediaPipe's own docs, not an assumption): the origin is
+   * the midpoint of the hips, **reset on every single frame**. That makes
+   * world landmarks excellent for *same-frame, relative* measurements —
+   * one joint vs. another, limb lengths, joint angles — but structurally
+   * useless for tracking how a joint's *own* position changes *across*
+   * frames (the hip itself is always ~(0,0,0); it can never show
+   * movement). For that, use `normalizedLandmarks` below instead. This
+   * was found the hard way: `computeVerticalOscillation` originally read
+   * hip.y here and always computed ~0 — not a bug in the peak-finding,
+   * a wrong coordinate space for a cross-frame measurement.
+   *
    * ASSUMPTION, not yet verified against a real captured session: +Y
    * increases downward, matching MediaPipe's normalized image-landmark
    * convention (smaller y = higher up, e.g. head; larger y = lower, e.g.
    * feet). Every "higher/lower" comparison in this module depends on that
    * sign. If computed metrics look inverted once run against real
-   * footage (Batch 5+), this is the first thing to check.
+   * footage, this is the first thing to check.
    */
   worldLandmarks: PoseLandmark[];
+  /**
+   * Normalized (image-space) landmarks (PoseLandmarkerResult.landmarks[0]):
+   * x/y in [0,1] relative to the video frame — genuine **absolute**
+   * image-plane position, *not* recentered to the hip the way world
+   * landmarks are. Use this specifically for tracking a joint's position
+   * *across* frames (vertical oscillation, direction of travel), assuming
+   * the camera itself is reasonably stationary during capture.
+   *
+   * `z` on these points is still hip-relative depth (same origin as world
+   * landmarks), not an absolute coordinate — never use `.z` here for
+   * anything that assumes a cross-frame or absolute meaning; only `.x`/
+   * `.y` are safe for that.
+   *
+   * Optional: older/synthetic frames that don't need cross-frame tracking
+   * can omit it. A function that needs it (and doesn't have it) should
+   * return `null`/fall back, not throw — see `tryNormalizedLandmark`.
+   */
+  normalizedLandmarks?: PoseLandmark[];
 }
 
-/** Looks up a landmark by index, throwing if the frame doesn't have it — a
- * caller bug (an incomplete frame should never have been pushed) rather
- * than something to silently tolerate. */
+/** Looks up a world landmark by index, throwing if the frame doesn't have
+ * it — a caller bug (an incomplete frame should never have been pushed)
+ * rather than something to silently tolerate. */
 export function landmark(frame: PoseFrame, index: number): PoseLandmark {
   const point = frame.worldLandmarks[index];
   if (!point) {
     throw new Error(`Pose frame at ${frame.timestampMs}ms is missing landmark index ${index}`);
   }
   return point;
+}
+
+/** Looks up a normalized landmark by index, returning `null` (not
+ * throwing) if the frame has no `normalizedLandmarks` at all or is
+ * missing that specific point — unlike `landmark`, this is an optional
+ * field, so "not present" is an expected, handle-it case, not a bug. */
+export function tryNormalizedLandmark(frame: PoseFrame, index: number): PoseLandmark | null {
+  return frame.normalizedLandmarks?.[index] ?? null;
 }
 
 /** Below this MediaPipe visibility score, treat a landmark as too
