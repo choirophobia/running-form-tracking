@@ -98,9 +98,10 @@ export default function Home() {
       {videoUrl && (
         <Step number={2} title="Play to analyze">
           <p className="mb-3 max-w-prose text-sm text-stone">
-            Press play — pose tracking runs live, and the report below updates whenever you pause
-            or the video ends. Playback runs at half speed so tracking can keep up with fast
-            movement; this doesn&apos;t affect the computed metrics.
+            Press play — pose tracking runs live, and the report below updates a couple of times a
+            second as it goes, following along with your current run rather than waiting until you
+            pause. Playback runs at half speed so tracking can keep up with fast movement; this
+            doesn&apos;t affect the computed metrics.
           </p>
           <div className="relative w-full overflow-hidden border border-line">
             <video

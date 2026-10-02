@@ -166,9 +166,10 @@ export default function PosePocPage() {
             Recompute metrics from frames collected so far
           </button>
           <p style={{ fontSize: 13, color: "#666", marginBottom: 12 }}>
-            Metrics recompute automatically whenever you pause or the video
-            ends, over every frame collected across all play/pause cycles so
-            far (not just the most recent one).
+            Metrics recompute automatically about twice a second during playback (throttled — a
+            full recompute re-scans every frame collected so far, so it doesn&apos;t run on every
+            single detected frame), plus whenever you pause or the video ends, over every frame
+            collected across all play/pause cycles so far (not just the most recent one).
           </p>
 
           {metrics && <MetricsPanel metrics={metrics.result} frameCount={metrics.frameCount} />}

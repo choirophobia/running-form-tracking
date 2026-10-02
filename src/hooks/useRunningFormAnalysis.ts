@@ -54,7 +54,27 @@ interface LoopRefs {
   vfcRef: RefObject<number | null>;
   lastVideoTimeRef: RefObject<number>;
   framesRef: RefObject<PoseFrame[]>;
+  /** Always the current render's recomputeMetrics (kept fresh via a no-
+   * dependency effect — the "latest ref" pattern) so this module-scope
+   * loop can trigger a live metrics update without closing over a stale
+   * `fpsGate`/`setMetrics` from whatever render started the loop. */
+  recomputeMetricsRef: RefObject<() => void>;
+  /** Wall-clock (performance.now()) timestamp of the last live recompute —
+   * see LIVE_METRICS_UPDATE_INTERVAL_MS for why this is throttled rather
+   * than run on every single detected frame. */
+  lastLiveUpdateAtRef: RefObject<number>;
 }
+
+// Recomputing metrics re-scans the *entire* frame buffer collected so far
+// (footstrike peak-detection isn't incremental) — cheap for one call, but
+// detectForVideo already runs once per decoded frame (up to ~60/s at full
+// real-world speed, though ANALYSIS_PLAYBACK_RATE halves that in practice)
+// and is already the tight part of this loop (see that constant's own
+// comment). Running a full metrics recompute at that same frequency would
+// add real work on top of an already-strained per-frame budget. Twice a
+// second is frequent enough to read as "live" to a human watching the
+// numbers, without competing with detection for CPU time.
+const LIVE_METRICS_UPDATE_INTERVAL_MS = 500;
 
 function cancelScheduledFrame(refs: LoopRefs) {
   const video = refs.videoRef.current;
@@ -122,6 +142,16 @@ function startPoseLoop(refs: LoopRefs) {
           worldLandmarks,
           normalizedLandmarks,
         });
+      }
+
+      // Live metrics: the same recompute pause/ended already trigger, just
+      // throttled and run during playback too, so the report follows what's
+      // currently happening in the video instead of only appearing once
+      // it's paused. See LIVE_METRICS_UPDATE_INTERVAL_MS.
+      const now = performance.now();
+      if (now - refs.lastLiveUpdateAtRef.current >= LIVE_METRICS_UPDATE_INTERVAL_MS) {
+        refs.lastLiveUpdateAtRef.current = now;
+        refs.recomputeMetricsRef.current();
       }
     }
 
@@ -199,14 +229,36 @@ export function useRunningFormAnalysis(): UseRunningFormAnalysisResult {
   const vfcRef = useRef<number | null>(null);
   const lastVideoTimeRef = useRef(-1);
   const framesRef = useRef<PoseFrame[]>([]);
+  const recomputeMetricsRef = useRef<() => void>(() => {});
+  const lastLiveUpdateAtRef = useRef(0);
 
   const pendingFileRef = useRef<File | null>(null);
 
   // Refs are already stable across renders — this memo just gives us one
-  // stable object to depend on instead of seven separate ref values.
+  // stable object to depend on instead of nine separate ref values.
   const loopRefs = useMemo<LoopRefs>(
-    () => ({ videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef, framesRef }),
-    [videoRef, canvasRef, landmarkerRef, rafRef, vfcRef, lastVideoTimeRef, framesRef]
+    () => ({
+      videoRef,
+      canvasRef,
+      landmarkerRef,
+      rafRef,
+      vfcRef,
+      lastVideoTimeRef,
+      framesRef,
+      recomputeMetricsRef,
+      lastLiveUpdateAtRef,
+    }),
+    [
+      videoRef,
+      canvasRef,
+      landmarkerRef,
+      rafRef,
+      vfcRef,
+      lastVideoTimeRef,
+      framesRef,
+      recomputeMetricsRef,
+      lastLiveUpdateAtRef,
+    ]
   );
 
   const [status, setStatus] = useState<Status>({ phase: "loading-model" });
@@ -275,6 +327,7 @@ export function useRunningFormAnalysis(): UseRunningFormAnalysisResult {
     setVideoUrl(null);
     lastVideoTimeRef.current = -1;
     framesRef.current = [];
+    lastLiveUpdateAtRef.current = 0;
     setMetrics(null);
     pendingFileRef.current = file;
     setFpsGate({ phase: "checking" });
@@ -345,6 +398,16 @@ export function useRunningFormAnalysis(): UseRunningFormAnalysisResult {
       strideDiagnostics: computeStrideDiagnostics(framesRef.current),
     });
   }
+
+  // Keeps recomputeMetricsRef pointing at *this* render's recomputeMetrics
+  // (closing over the current fpsGate/setMetrics) — runs after every
+  // render, no dependency array, the standard "latest ref" pattern. The
+  // module-scope pose loop calls this ref rather than a function captured
+  // once when the loop started, which would otherwise keep calling a
+  // stale closure for the lifetime of that play session.
+  useEffect(() => {
+    recomputeMetricsRef.current = recomputeMetrics;
+  });
 
   return {
     status,

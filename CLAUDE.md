@@ -453,6 +453,32 @@ Verified via Vitest (122 tests passing, including the new regression test) plus 
 report (or the `/pose-poc` stride-diagnostics table, which will now also no longer show
 near-zero `Δ prev (ms)` rows) once they re-test.
 
+## Live metrics during playback (not just on pause/end)
+
+`useRunningFormAnalysis.ts` originally only called `computeMetrics` from `handlePause`/on `ended` —
+the report stayed static while a video was actually playing. Now the module-scope pose loop
+(`onFrame`, see that section's own module-scope-vs-component-body note above) also triggers a
+recompute during playback, throttled to once every `LIVE_METRICS_UPDATE_INTERVAL_MS` (500ms, not
+every detected frame) — a full recompute re-scans the *entire* frame buffer (footstrike
+peak-detection isn't incremental), and `detectForVideo` already runs once per decoded frame as the
+tight part of this loop; stacking a full metrics recompute on every one of those calls too would
+add real competing CPU work. Twice a second reads as "live" to someone watching the numbers
+without doing that.
+
+Mechanism, since `onFrame` is intentionally outside the component (same purity reasoning as the
+rest of that loop) and can't just call a function closed over the render that started playback —
+that closure would go stale the moment `fpsGate` or `setMetrics` changed identity:
+`recomputeMetricsRef` (a `LoopRefs` member) is kept pointing at the *current* render's
+`recomputeMetrics` via a no-dependency-array `useEffect` (runs after every render — the standard
+"latest ref" pattern), and `onFrame` calls `refs.recomputeMetricsRef.current()` instead of a
+captured function. `lastLiveUpdateAtRef` tracks the wall-clock (`performance.now()`) gate and
+resets to 0 on a new file selection.
+
+No change to `recomputeMetrics` itself or to what gets computed — same function, same
+`fpsGate.phase !== "resolved"` guard, same "not enough data yet" null-handling the UI already
+renders correctly; it's purely called more often now. `/` and `/pose-poc`'s copy both updated to
+describe this.
+
 ## Product & architectural constraints (do not violate)
 
 - **Zero infrastructure cost is a hard constraint.** All pose inference must run client-side.
