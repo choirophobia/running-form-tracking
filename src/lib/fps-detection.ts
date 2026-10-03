@@ -33,6 +33,11 @@ const MAX_PLAUSIBLE_FPS = 480;
 const FULL_CONFIDENCE_FPS = 120;
 const REDUCED_CONFIDENCE_FPS = 60;
 const FRAME_COUNT_SAMPLE_SECONDS = 2;
+// Upper bound on the frame-counting fallback. A file the browser can't
+// decode (e.g. HEVC .mov in a browser without HEVC support) doesn't always
+// fire `error` — playback can just never start — which would otherwise leave
+// the UI on "Checking video frame rate…" forever.
+const FRAME_COUNT_TIMEOUT_MS = 10_000;
 
 // Minimal shape of what we read from mediainfo.js's result — not the full
 // published type (see the CDN-loading note above for why we don't import
@@ -60,12 +65,20 @@ let mediaInfoFactoryPromise: Promise<MediaInfoFactory> | null = null;
 
 function loadMediaInfoFactory(): Promise<MediaInfoFactory> {
   if (!mediaInfoFactoryPromise) {
-    // MEDIAINFO_ESM_BUNDLE_URL is a variable, not an inline literal, so the
-    // bundler can't statically resolve this specifier — it stays a plain
-    // runtime browser import of the CDN URL.
-    mediaInfoFactoryPromise = import(MEDIAINFO_ESM_BUNDLE_URL).then(
+    // The `webpackIgnore` comment is load-bearing: a variable specifier alone
+    // is NOT enough — Turbopack still rewrites `import(variable)` into its own
+    // `__turbopack_context__.x(url, () => require(url))` external loader,
+    // which can't fetch an https URL in the browser. That silently broke the
+    // metadata path (every video fell through to frame counting) until the
+    // compiled chunk was checked. Next's docs list `webpackIgnore` as honored
+    // by Turbopack ("skip bundling, preserve import").
+    mediaInfoFactoryPromise = import(/* webpackIgnore: true */ MEDIAINFO_ESM_BUNDLE_URL).then(
       (mod) => mod.default as MediaInfoFactory
     );
+    // Don't cache a failed load forever — let the next file selection retry.
+    mediaInfoFactoryPromise.catch(() => {
+      mediaInfoFactoryPromise = null;
+    });
   }
   return mediaInfoFactoryPromise;
 }
@@ -137,8 +150,13 @@ function detectFpsByFrameCounting(
     let lastMediaTime = 0;
     let frameCount = 0;
     let settled = false;
+    const timeoutId = setTimeout(
+      () => fail(new Error("Timed out decoding video for frame counting.")),
+      FRAME_COUNT_TIMEOUT_MS
+    );
 
     function cleanup() {
+      clearTimeout(timeoutId);
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -203,7 +221,8 @@ export async function detectFps(file: File): Promise<FpsDetectionResult> {
 
   try {
     fps = await detectFpsFromMetadata(file);
-  } catch {
+  } catch (err) {
+    console.warn("Fps metadata read failed, falling back to frame counting:", err);
     fps = null;
   }
 
