@@ -17,6 +17,10 @@ export interface AnalysisRow {
   overstride: number | null;
   hip_drop: number | null;
   arm_swing_symmetry: number | null;
+  /** Milliseconds — added in Batch 6's migration, see supabase/migrations/. */
+  ground_contact_time: number | null;
+  /** Milliseconds — added in Batch 6's migration, see supabase/migrations/. */
+  flight_time: number | null;
   landing_form: string | null;
   landing_form_confidence: LandingFormConfidence | null;
   flags: string[];
@@ -34,6 +38,8 @@ export type CreateAnalysisInput = Partial<
     | "overstride"
     | "hip_drop"
     | "arm_swing_symmetry"
+    | "ground_contact_time"
+    | "flight_time"
     | "landing_form"
     | "landing_form_confidence"
     | "flags"
@@ -48,6 +54,8 @@ const NULLABLE_NUMBER_FIELDS = [
   "overstride",
   "hip_drop",
   "arm_swing_symmetry",
+  "ground_contact_time",
+  "flight_time",
 ] as const;
 
 const NULLABLE_STRING_FIELDS = ["video_storage_path", "landing_form"] as const;
@@ -71,6 +79,10 @@ const NUMBER_FIELD_BOUNDS: Partial<
   overstride: { min: -100, max: 100 },
   hip_drop: { min: 0, max: 90 }, // pelvis tilt can't physically exceed 90deg
   arm_swing_symmetry: { min: 0, max: 100 }, // matches computeArmSwingSymmetry's own 0-100 scale
+  // Milliseconds. A whole stride cycle is well under 2s even when walking,
+  // so either phase alone can't plausibly exceed that.
+  ground_contact_time: { min: 0, max: 2000 },
+  flight_time: { min: 0, max: 2000 },
 };
 
 function isNullableNumber(value: unknown): value is number | null | undefined {

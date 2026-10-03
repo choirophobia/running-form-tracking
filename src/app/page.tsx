@@ -1,7 +1,13 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState } from "react";
+import { HistorySidebar } from "@/components/history/HistorySidebar";
+import { SavedReport } from "@/components/history/SavedReport";
+import { MetricCard, MetricGroup, PctOfLegLength, Step } from "@/components/report";
+import { useHistory } from "@/hooks/useHistory";
 import { TIER_LABEL, useRunningFormAnalysis } from "@/hooks/useRunningFormAnalysis";
+import { useSession, type UseSessionResult } from "@/hooks/useSession";
+import { toAnalysisInput } from "@/lib/history/to-analysis-input";
 import type { MetricsResult } from "@/lib/metrics";
 
 // Batch 5: the real report UI, styled per running-brand-design-tokens.md.
@@ -15,8 +21,22 @@ import type { MetricsResult } from "@/lib/metrics";
 // one. The metric grid shows every metric at equal visual weight instead.
 // Recommendations (PRD Section 7, Batch 7) also aren't built — there's
 // nothing to flag metrics against yet.
+//
+// Batch 6 adds PRD Section 8's history: a left sidebar (sign-in, then the
+// user's saved runs), a "Save to history" control under the live report,
+// and a saved-run view in the main panel. The live analysis stays mounted
+// (just hidden) while a saved run is open, so going back to it doesn't
+// lose the current video or its computed metrics.
 
 export default function Home() {
+  const auth = useSession();
+  const history = useHistory(auth.session, auth.authedFetch);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Signing out (or into another account) must not leave a previous
+  // account's saved run open — derive it from the current list instead of
+  // storing the row itself.
+  const selected = history.analyses.find((a) => a.id === selectedId) ?? null;
+
   const {
     status,
     videoRef,
@@ -32,125 +52,215 @@ export default function Home() {
   } = useRunningFormAnalysis();
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-6 py-10 sm:px-10">
-      <header className="mb-10">
-        <h1 className="font-display text-3xl uppercase tracking-wide text-ink sm:text-4xl">
-          Running Form Tracker
-        </h1>
-        <p className="mt-2 max-w-prose text-sm text-stone">
-          Upload a video of yourself running. Pose tracking and every metric below run entirely
-          in your browser — nothing is uploaded anywhere.
-        </p>
-      </header>
+    <div className="md:flex">
+      <HistorySidebar
+        auth={auth}
+        history={history}
+        selectedId={selected?.id ?? null}
+        onSelect={(id) => {
+          videoRef.current?.pause();
+          setSelectedId(id);
+        }}
+        onNewAnalysis={() => setSelectedId(null)}
+      />
 
-      <Step number={1} title="Upload your video">
-        {status.phase === "loading-model" && (
-          <p className="text-sm text-stone">Loading pose model…</p>
-        )}
-        {status.phase === "error" && <p className="text-sm text-rust">{status.message}</p>}
+      {selected && (
+        <main className="w-full max-w-3xl min-w-0 px-6 py-10 sm:px-10">
+          <SavedReport analysis={selected} />
+        </main>
+      )}
 
-        <label className="mt-2 inline-flex min-h-11 cursor-pointer items-center border border-line px-4 py-2 text-sm text-ink transition-colors hover:border-ink">
-          <input
-            type="file"
-            accept="video/*"
-            className="hidden"
-            disabled={status.phase === "loading-model"}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFileSelect(file);
-            }}
-          />
-          Choose a video
-        </label>
+      <main hidden={selected !== null} className="w-full max-w-3xl min-w-0 px-6 py-10 sm:px-10">
+        <header className="mb-10">
+          <h1 className="font-display text-3xl uppercase tracking-wide text-ink sm:text-4xl">
+            Running Form Tracker
+          </h1>
+          <p className="mt-2 max-w-prose text-sm text-stone">
+            Upload a video of yourself running. Pose tracking and every metric below run entirely
+            in your browser — your video never leaves it. Signed in, you can save the computed
+            numbers to your history.
+          </p>
+        </header>
 
-        {fpsGate.phase === "checking" && (
-          <p className="mt-3 text-sm text-stone">Checking video frame rate…</p>
-        )}
-        {fpsGate.phase === "error" && <p className="mt-3 text-sm text-rust">{fpsGate.message}</p>}
-        {fpsGate.phase === "blocked" && (
-          <div className="mt-3 max-w-md border border-line p-4">
-            <p className="text-sm text-ink">
-              This video is{" "}
-              <span className="font-mono">{fpsGate.result.fps.toFixed(1)}fps</span>, below the
-              60fps needed for landing form detection. Slow-mo capture is needed for that metric
-              specifically — the rest of the analysis does not need it.
+        <Step number={1} title="Upload your video">
+          {status.phase === "loading-model" && (
+            <p className="text-sm text-stone">Loading pose model…</p>
+          )}
+          {status.phase === "error" && <p className="text-sm text-rust">{status.message}</p>}
+
+          <label className="mt-2 inline-flex min-h-11 cursor-pointer items-center border border-line px-4 py-2 text-sm text-ink transition-colors hover:border-ink">
+            <input
+              type="file"
+              accept="video/*"
+              className="hidden"
+              disabled={status.phase === "loading-model"}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileSelect(file);
+              }}
+            />
+            Choose a video
+          </label>
+
+          {fpsGate.phase === "checking" && (
+            <p className="mt-3 text-sm text-stone">Checking video frame rate…</p>
+          )}
+          {fpsGate.phase === "error" && <p className="mt-3 text-sm text-rust">{fpsGate.message}</p>}
+          {fpsGate.phase === "blocked" && (
+            <div className="mt-3 max-w-md border border-line p-4">
+              <p className="text-sm text-ink">
+                This video is{" "}
+                <span className="font-mono">{fpsGate.result.fps.toFixed(1)}fps</span>, below the
+                60fps needed for landing form detection. Slow-mo capture is needed for that metric
+                specifically — the rest of the analysis does not need it.
+              </p>
+              <button
+                onClick={handleContinueWithoutLandingForm}
+                className="mt-3 inline-flex min-h-11 items-center border border-ink px-4 text-sm text-ink transition-colors hover:bg-ink hover:text-paper"
+              >
+                Continue without landing form
+              </button>
+            </div>
+          )}
+          {fpsGate.phase === "resolved" && (
+            <p className="mt-3 text-sm">
+              <span className={fpsGate.result.tier === "full" ? "text-field" : "text-rust"}>
+                {fpsGate.result.fps.toFixed(1)}fps — {TIER_LABEL[fpsGate.result.tier]}
+              </span>
+              {!fpsGate.landingFormAvailable && (
+                <span className="text-stone"> · landing form disabled</span>
+              )}
             </p>
-            <button
-              onClick={handleContinueWithoutLandingForm}
-              className="mt-3 inline-flex min-h-11 items-center border border-ink px-4 text-sm text-ink transition-colors hover:bg-ink hover:text-paper"
-            >
-              Continue without landing form
-            </button>
-          </div>
-        )}
-        {fpsGate.phase === "resolved" && (
-          <p className="mt-3 text-sm">
-            <span className={fpsGate.result.tier === "full" ? "text-field" : "text-rust"}>
-              {fpsGate.result.fps.toFixed(1)}fps — {TIER_LABEL[fpsGate.result.tier]}
-            </span>
-            {!fpsGate.landingFormAvailable && (
-              <span className="text-stone"> · landing form disabled</span>
-            )}
-          </p>
-        )}
-      </Step>
-
-      {videoUrl && (
-        <Step number={2} title="Play to analyze">
-          <p className="mb-3 max-w-prose text-sm text-stone">
-            Press play — pose tracking runs live, and the report below updates a couple of times a
-            second as it goes, following along with your current run rather than waiting until you
-            pause. Playback runs at half speed so tracking can keep up with fast movement; this
-            doesn&apos;t affect the computed metrics.
-          </p>
-          <div className="relative w-full overflow-hidden border border-line">
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              controls
-              playsInline
-              onLoadedMetadata={handleLoadedMetadata}
-              onPlay={handlePlay}
-              onPause={handlePause}
-              onEnded={handlePause}
-              className="block w-full"
-            />
-            <canvas
-              ref={canvasRef}
-              className="pointer-events-none absolute inset-0 h-full w-full"
-            />
-          </div>
+          )}
         </Step>
-      )}
 
-      {metrics && (
-        <Step number={3} title="Report">
-          <MetricGrid metrics={metrics.result} />
-        </Step>
-      )}
-    </main>
+        {videoUrl && (
+          <Step number={2} title="Play to analyze">
+            <p className="mb-3 max-w-prose text-sm text-stone">
+              Press play — pose tracking runs live, and the report below updates a couple of times a
+              second as it goes, following along with your current run rather than waiting until you
+              pause. Playback runs at half speed so tracking can keep up with fast movement; this
+              doesn&apos;t affect the computed metrics.
+            </p>
+            <div className="relative w-full overflow-hidden border border-line">
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                controls
+                playsInline
+                onLoadedMetadata={handleLoadedMetadata}
+                onPlay={handlePlay}
+                onPause={handlePause}
+                onEnded={handlePause}
+                className="block w-full"
+              />
+              <canvas
+                ref={canvasRef}
+                className="pointer-events-none absolute inset-0 h-full w-full"
+              />
+            </div>
+          </Step>
+        )}
+
+        {metrics && (
+          <Step number={3} title="Report">
+            <MetricGrid metrics={metrics.result} />
+            <SaveRun
+              auth={auth}
+              metrics={metrics.result}
+              videoFps={fpsGate.phase === "resolved" ? fpsGate.result.fps : null}
+              videoUrl={videoUrl}
+              playing={status.phase === "running"}
+              onSaved={history.reload}
+            />
+          </Step>
+        )}
+      </main>
+    </div>
   );
 }
 
-function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
+/**
+ * Batch 6: saves the current report's headline numbers (never the video)
+ * via `POST /api/analyses`. Disabled while the video is playing — the live
+ * report is still changing then, and saving mid-run would store a partial
+ * result. One save per loaded video: `savedFor` remembers which video URL
+ * was saved, so pausing again (which recomputes) can't create duplicates.
+ */
+function SaveRun({
+  auth,
+  metrics,
+  videoFps,
+  videoUrl,
+  playing,
+  onSaved,
+}: {
+  auth: UseSessionResult;
+  metrics: MetricsResult;
+  videoFps: number | null;
+  videoUrl: string | null;
+  playing: boolean;
+  onSaved: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedFor, setSavedFor] = useState<string | null>(null);
+
+  if (!auth.session) {
+    return (
+      <p className="mt-6 text-sm text-stone">Sign in from the history panel to save this run.</p>
+    );
+  }
+  if (videoUrl !== null && savedFor === videoUrl) {
+    return <p className="mt-6 text-sm text-field">Saved to your history.</p>;
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await auth.authedFetch("/api/analyses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(toAnalysisInput(metrics, videoFps)),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        console.error("Saving analysis failed:", res.status, body.error);
+        setError(
+          res.status === 400
+            ? "Some of these numbers look off, so this run wasn't saved. Try a clearer clip."
+            : res.status === 401
+              ? "Your session expired. Sign in again, then save."
+              : "Couldn't save this run. Try again in a moment."
+        );
+        return;
+      }
+      setSavedFor(videoUrl);
+      onSaved();
+    } catch (err) {
+      console.error("Saving analysis failed:", err);
+      setError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <section className="mb-10 border-t border-line pt-6 first:border-t-0 first:pt-0">
-      <div className="mb-3 flex items-baseline gap-3">
-        <span className="font-mono text-xs text-stone">{String(number).padStart(2, "0")}</span>
-        <h2 className="font-display text-xl uppercase tracking-wide text-ink">{title}</h2>
-      </div>
-      {children}
-    </section>
+    <div className="mt-6">
+      <button
+        onClick={handleSave}
+        disabled={saving || playing}
+        className="inline-flex min-h-11 items-center border border-ink px-4 text-sm text-ink transition-colors hover:bg-ink hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {saving ? "Saving…" : "Save to history"}
+      </button>
+      {playing && (
+        <p className="mt-2 text-xs text-stone">Pause or finish the video to save its final numbers.</p>
+      )}
+      {error && <p className="mt-2 text-sm text-rust">{error}</p>}
+    </div>
   );
-}
-
-/** A numeric readout (percentage of leg length) within an otherwise-prose
- * note — rendered in the mono data-label face per
- * running-brand-design-tokens.md's type rule ("monospace... for numeric
- * readouts... only"), so a measurement reads as a measurement even inside
- * a sentence, not just in the card's headline value. */
-function PctOfLegLength({ percent }: { percent: number }) {
-  return <span className="font-mono">{percent.toFixed(1)}%</span>;
 }
 
 function deriveDomain(values: number[]): [number, number] {
@@ -354,77 +464,6 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
         This is a proof of concept. These numbers have not been validated against lab equipment —
         treat them as a rough signal, not a diagnosis.
       </p>
-    </div>
-  );
-}
-
-function MetricGroup({
-  label,
-  columnsClassName,
-  children,
-}: {
-  label: string;
-  /** Tailwind column classes sized to exactly this group's card count —
-   * omit for a single card, which renders at a capped width instead of a
-   * full-bleed one-column "grid". */
-  columnsClassName?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="mb-6 last:mb-0">
-      <p className="mb-2 text-xs text-stone">{label}</p>
-      {columnsClassName ? (
-        <div className={`grid grid-cols-1 gap-px border border-line bg-line ${columnsClassName}`}>
-          {children}
-        </div>
-      ) : (
-        <div className="max-w-xs border border-line bg-line p-px">{children}</div>
-      )}
-    </div>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  unit,
-  note,
-  accent,
-  strip,
-}: {
-  label: string;
-  value: string | null;
-  unit?: string;
-  note?: ReactNode;
-  accent?: "field" | "rust";
-  /** Optional per-stride strip plot (see StripPlot) rendered below the
-   * note — omitted entirely, not shown empty, when there's no value or
-   * too few samples to plot. */
-  strip?: ReactNode;
-}) {
-  return (
-    <div className="bg-paper p-4">
-      <p className="text-xs text-stone">{label}</p>
-      {value ? (
-        <p
-          className={`mt-1 font-display text-3xl leading-none ${
-            // Default is the --energy accent, not flat ink — every card's
-            // headline number is "hero data" for its own card even though
-            // the page has no single page-wide hero number (see
-            // CLAUDE.md's Design system section). rust/field still
-            // override it for their existing specific flagged meanings —
-            // a card never shows more than one of the three at once.
-            accent === "field" ? "text-field" : accent === "rust" ? "text-rust" : "text-energy"
-          }`}
-        >
-          {value}
-          {unit && <span className="ml-1 font-sans text-base text-stone">{unit}</span>}
-        </p>
-      ) : (
-        <p className="mt-1 font-mono text-sm text-stone">not enough data</p>
-      )}
-      {note && <p className="mt-1 text-xs text-stone">{note}</p>}
-      {value && strip}
     </div>
   );
 }
