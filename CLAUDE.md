@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Batches 1-4 are done (pose detection, fps gate, metric computation, Supabase schema + API —
-see their sections below). Batch 5 (report UI) is also done: `src/app/page.tsx` is now the real
-product page at `/`, styled per `running-brand-design-tokens.md`. It still isn't wired to Batch
-4's API — **computed metrics don't get saved anywhere yet**, there's no sign-up/sign-in UI, and
-history (Batch 6) doesn't exist. Read `running-form-saas-prd-v0.md` and
+Batches 1-6 are done (pose detection, fps gate, metric computation, Supabase schema + API,
+report UI, history sidebar — see their sections below). `src/app/page.tsx` is the real product
+page at `/`, styled per `running-brand-design-tokens.md`, now with email + password sign-in,
+"Save to history", and a left history sidebar (Batch 6). Still missing: the efficiency score and
+progress delta (PRD Section 12 open decision) and recommendations (Batch 7). Read `running-form-saas-prd-v0.md` and
 `running-brand-design-tokens.md` in full before extending this — they are the source of truth,
 not this summary.
 
@@ -23,7 +23,8 @@ Recommended build order (from the PRD, Section 11):
    into any UI yet — see the Batch 4 section below)
 5. Report UI using the design tokens — **done** (see the Batch 5 section below) — no hero
    efficiency score (PRD Section 12 open decision) and no recommendations (Batch 7) yet
-6. History sidebar
+6. History sidebar — **done** (see the Batch 6 section below) — cadence stands in for the
+   not-yet-defined score; no progress delta yet
 7. Recommendations engine with the curated citation/video table
 
 ## Commands
@@ -478,6 +479,41 @@ No change to `recomputeMetrics` itself or to what gets computed — same functio
 `fpsGate.phase !== "resolved"` guard, same "not enough data yet" null-handling the UI already
 renders correctly; it's purely called more often now. `/` and `/pose-poc`'s copy both updated to
 describe this.
+
+## Batch 6: history sidebar (+ the sign-in and saving it depends on)
+
+PRD Section 8. History needed two things that didn't exist yet, so they were built first:
+
+- **Auth is proxied, not browser-direct.** `src/app/api/auth/{sign-up,sign-in,refresh}/route.ts`
+  (helpers in `src/lib/supabase/auth.ts`) wrap Supabase email + password auth with the anon key.
+  The browser never talks to Supabase itself: `NEXT_PUBLIC_SUPABASE_URL` is a local
+  `127.0.0.1:54321`, unreachable for anyone visiting through a Cloudflare tunnel — only the Next
+  server can reach it. Supabase's raw auth errors are mapped to plain copy (`friendlyAuthError`).
+  Local email confirmation is off (`supabase/config.toml`), so sign-up returns a session at once;
+  with confirmation on, sign-up returns a "check your email" 409 instead of a half-signed-in state.
+- `src/hooks/useSession.ts` — session in `localStorage` (every access try/caught), refreshed
+  ~60s before expiry and retried once on a 401 via `authedFetch`. `src/hooks/useHistory.ts` —
+  pages `GET /api/analyses` (refetches on user change, not on token refresh).
+- **Saving**: `src/lib/history/to-analysis-input.ts` maps a `MetricsResult` to the
+  `POST /api/analyses` body (null stays null; no `score`; empty `flags` — no flagging logic until
+  Batch 7). `SaveRun` in `page.tsx` is disabled while the video plays (the live report is still
+  changing) and saves once per loaded video. Only headline numbers persist — no video, strip
+  plots, camera angle, or leg-length %, and the saved view says so.
+- **Migration** `20261003000000_analyses_contact_flight_time.sql` adds `ground_contact_time` and
+  `flight_time` (ms, nullable, bounded 0-2000 in `analyses.ts`) so saved reports keep all 8 metrics.
+- **UI**: `src/components/history/HistorySidebar.tsx` (sign-in form when signed out; otherwise
+  "New analysis" + newest-first list: date in mono as the label, cadence as the quiet second
+  line — the PRD's score doesn't exist yet) and `SavedReport.tsx`. Shared cards moved from
+  `page.tsx` to `src/components/report.tsx` (a page file can't export helpers). The live analysis
+  stays mounted but `hidden` while a saved run is open, so switching back keeps the video. A saved
+  positive overstride gets no rust flag: whether it was signed isn't stored.
+- **Not built, on purpose**: progress delta (needs the score) and the score itself.
+
+Tests: `src/app/api/auth/auth.supabase.test.ts` (real local Supabase: sign up → sign in → refresh
+→ save with the new columns → list; duplicate email; wrong password; bad refresh token) and
+`to-analysis-input.test.ts`. Also walked through in real Chrome (sign-up, list, saved view,
+back to live, reload persistence, mobile width, sign-out, wrong password). The "Save to history"
+click itself wasn't exercised in-browser — it needs footage with a real person in it.
 
 ## Product & architectural constraints (do not violate)
 

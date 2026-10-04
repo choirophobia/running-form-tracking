@@ -12,6 +12,8 @@ describe("parseCreateAnalysisInput", () => {
       overstride: 12.1,
       hip_drop: 4.6,
       arm_swing_symmetry: 91,
+      ground_contact_time: 240,
+      flight_time: 110,
       landing_form: "heel",
       landing_form_confidence: "full",
       flags: ["overstride"],
@@ -80,6 +82,12 @@ describe("parseCreateAnalysisInput", () => {
     });
     expect(parseCreateAnalysisInput({ arm_swing_symmetry: 101 })).toEqual({
       error: '"arm_swing_symmetry" must be between 0 and 100 (got 101).',
+    });
+    expect(parseCreateAnalysisInput({ ground_contact_time: 2500 })).toEqual({
+      error: '"ground_contact_time" must be between 0 and 2000 (got 2500).',
+    });
+    expect(parseCreateAnalysisInput({ flight_time: -1 })).toEqual({
+      error: '"flight_time" must be between 0 and 2000 (got -1).',
     });
     expect(parseCreateAnalysisInput({ video_fps: 0 })).toEqual({
       error: '"video_fps" must be between 0.1 and 1000 (got 0).',
