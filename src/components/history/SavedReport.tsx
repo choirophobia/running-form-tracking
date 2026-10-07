@@ -1,4 +1,6 @@
+import { cardJudgement, RecommendationsSection } from "@/components/recommendations";
 import { MetricCard, MetricGroup } from "@/components/report";
+import { knownFlags, type MetricId } from "@/lib/recommendations";
 import type { AnalysisRow } from "@/lib/supabase/analyses";
 import { formatRecordedAt } from "./format";
 
@@ -17,6 +19,10 @@ export function SavedReport({ analysis }: { analysis: AnalysisRow }) {
     analysis.landing_form_confidence && analysis.landing_form_confidence !== "unavailable"
       ? `${analysis.landing_form_confidence} confidence`
       : undefined;
+  // Batch 7: the flags stored when this run was saved — not recomputed, so
+  // the report reads the same even if a cutoff in the table changes later.
+  const flags = knownFlags(analysis.flags ?? []);
+  const judge = (id: MetricId, value: unknown) => cardJudgement(id, flags, value != null);
 
   return (
     <div className="animate-[fade-in_0.3s_ease-out]">
@@ -33,42 +39,47 @@ export function SavedReport({ analysis }: { analysis: AnalysisRow }) {
       </p>
 
       <MetricGroup label="Timing" columnsClassName="sm:grid-cols-3">
-        <MetricCard label="Cadence" value={fixed(analysis.cadence, 0)} unit="spm" />
+        <MetricCard label="Cadence" {...judge("cadence", analysis.cadence)} value={fixed(analysis.cadence, 0)} unit="spm" />
         <MetricCard
           label="Ground contact time"
+          {...judge("ground_contact_time", analysis.ground_contact_time)}
           value={fixed(analysis.ground_contact_time, 0)}
           unit="ms"
         />
-        <MetricCard label="Flight time" value={fixed(analysis.flight_time, 0)} unit="ms" />
+        <MetricCard label="Flight time" {...judge("flight_time", analysis.flight_time)} value={fixed(analysis.flight_time, 0)} unit="ms" />
       </MetricGroup>
 
       <MetricGroup label="Alignment & impact" columnsClassName="sm:grid-cols-2">
         <MetricCard
           label="Vertical oscillation"
+          {...judge("vertical_oscillation", analysis.vertical_oscillation)}
           value={fixed(analysis.vertical_oscillation, 1)}
           unit="cm"
         />
         <MetricCard
           label="Overstride"
+          {...judge("overstride", analysis.overstride)}
           value={analysis.overstride == null ? null : Math.abs(analysis.overstride).toFixed(1)}
           unit="cm"
           // Whether a positive value was a signed "ahead of center of mass"
-          // reading or an undirected distance isn't stored, so it gets no
-          // rust flag here — only a negative value (always signed) can be
-          // described with confidence.
+          // reading or an undirected distance isn't stored — only a negative
+          // value (always signed) can be described with confidence.
           note={analysis.overstride != null && analysis.overstride < 0 ? "behind center of mass" : undefined}
         />
-        <MetricCard label="Hip drop" value={fixed(analysis.hip_drop, 1)} unit="°" />
-        <MetricCard label="Landing form" value={analysis.landing_form} note={confidence} />
+        <MetricCard label="Hip drop" {...judge("hip_drop", analysis.hip_drop)} value={fixed(analysis.hip_drop, 1)} unit="°" />
+        <MetricCard label="Landing form" {...judge("landing_form", analysis.landing_form)} value={analysis.landing_form} note={confidence} />
       </MetricGroup>
 
       <MetricGroup label="Symmetry">
         <MetricCard
           label="Arm swing symmetry"
+          {...judge("arm_swing_symmetry", analysis.arm_swing_symmetry)}
           value={fixed(analysis.arm_swing_symmetry, 0)}
           unit="%"
         />
       </MetricGroup>
+
+      <RecommendationsSection flags={flags} hipDropMeasured={analysis.hip_drop != null} />
     </div>
   );
 }

@@ -59,6 +59,16 @@ describe("toAnalysisInput", () => {
       landing_form_confidence: "reduced",
     });
     expect(input).not.toHaveProperty("score");
+    expect(input.flags).toEqual([]);
     expect(parseCreateAnalysisInput(input)).toEqual(input);
+  });
+
+  it("saves the flags that were raised, so a saved report shows the same ones", () => {
+    const metrics = {
+      ...EMPTY,
+      cameraAngle: "front-or-rear",
+      hipDrop: { hipDropDegrees: 9.2, sampleCount: 6, samples: [9, 9.4] },
+    } as MetricsResult;
+    expect(toAnalysisInput(metrics, 120).flags).toEqual(["hip_drop"]);
   });
 });

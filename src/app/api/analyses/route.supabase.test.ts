@@ -91,6 +91,24 @@ describe("POST /api/analyses", () => {
     expect(body.analysis.landing_form_confidence).toBe("full");
   });
 
+  it("stores and returns Batch 7 flags, so a saved report shows what was flagged", async () => {
+    const created = await createAnalysis(
+      authedRequest("http://localhost/api/analyses", accessToken, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hip_drop: 9.1, flags: ["hip_drop"] }),
+      })
+    );
+    expect(created.status).toBe(201);
+    const { analysis } = await created.json();
+
+    const fetched = await getAnalysis(
+      authedRequest(`http://localhost/api/analyses/${analysis.id}`, accessToken),
+      { params: Promise.resolve({ id: analysis.id }) }
+    );
+    expect((await fetched.json()).analysis.flags).toEqual(["hip_drop"]);
+  });
+
   it("rejects a request with no Authorization header", async () => {
     const response = await createAnalysis(
       new Request("http://localhost/api/analyses", {

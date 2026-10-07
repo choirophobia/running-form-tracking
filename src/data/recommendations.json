@@ -1,0 +1,73 @@
+{
+  "hip_drop": {
+    "label": "Hip drop",
+    "flag": { "op": ">=", "value": 8.4, "unit": "°" },
+    "thresholdSource": "Bramah 2019 called pelvic drop aberrant at 5.6° (1 SD above healthy runners); Dingenen 2018 found 2D video can't reliably detect changes under 2.8°. 5.6 + 2.8 = 8.4°.",
+    "flaggedMessage": "Your hips dropped more than the research cutoff when each foot landed.",
+    "recommendation": {
+      "drill": "Raise your step rate by 10% with a metronome",
+      "rationale": "After one session retraining to a 10% higher step rate, runners with knee pain had about 3° less pelvic drop four weeks later.",
+      "citations": [
+        {
+          "authors": "Bramah et al.",
+          "year": 2019,
+          "title": "A 10% Increase in Step Rate Improves Running Kinematics and Clinical Outcomes in Runners With Patellofemoral Pain at 4 Weeks and 3 Months",
+          "doi": "10.1177/0363546519879693"
+        },
+        {
+          "authors": "Bramah et al.",
+          "year": 2018,
+          "title": "Is There a Pathological Gait Associated With Common Soft Tissue Running Injuries?",
+          "doi": "10.1177/0363546518793657"
+        },
+        {
+          "authors": "Dingenen et al.",
+          "year": 2018,
+          "title": "Test-retest reliability of two-dimensional video analysis during running",
+          "doi": "10.1016/j.ptsp.2018.06.009"
+        }
+      ],
+      "evidenceNote": "Limited evidence: the step-rate study is a 12-runner case series, and this app's 2D hip drop only approximates the 3D measure the studies used.",
+      "video": {
+        "url": "https://www.youtube.com/watch?v=vxbidUgskpM",
+        "title": "Increasing Running Step Rate in PFP",
+        "channel": "Physio Network"
+      }
+    }
+  },
+  "overstride": {
+    "label": "Overstride",
+    "flag": null,
+    "notJudgedReason": "Not judged: landing further ahead of the hip raises braking force, but research gives no cutoff."
+  },
+  "cadence": {
+    "label": "Cadence",
+    "flag": null,
+    "notJudgedReason": "Not judged: a good cadence depends on your speed, which a video can't measure."
+  },
+  "vertical_oscillation": {
+    "label": "Vertical oscillation",
+    "flag": null,
+    "notJudgedReason": "Not judged: bounce depends on speed and height, and research gives no cutoff."
+  },
+  "ground_contact_time": {
+    "label": "Ground contact time",
+    "flag": null,
+    "notJudgedReason": "Not judged: research finds almost no link between contact time and running cost."
+  },
+  "flight_time": {
+    "label": "Flight time",
+    "flag": null,
+    "notJudgedReason": "Not judged: research finds almost no link between flight time and running cost."
+  },
+  "landing_form": {
+    "label": "Landing form",
+    "flag": null,
+    "notJudgedReason": "Not judged: there's little evidence that heel, midfoot, or forefoot landing changes injury risk."
+  },
+  "arm_swing_symmetry": {
+    "label": "Arm swing symmetry",
+    "flag": null,
+    "notJudgedReason": "Not judged: some left-right difference is normal, and research gives no cutoff."
+  }
+}
