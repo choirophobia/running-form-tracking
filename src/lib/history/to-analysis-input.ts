@@ -1,4 +1,5 @@
 import type { MetricsResult } from "@/lib/metrics";
+import { flagMetrics } from "@/lib/recommendations";
 import type { CreateAnalysisInput } from "@/lib/supabase/analyses";
 
 // Batch 6: maps one computed report (Batch 3's MetricsResult) onto the
@@ -24,9 +25,9 @@ export function toAnalysisInput(metrics: MetricsResult, videoFps: number | null)
     flight_time: metrics.flightTime?.flightMs ?? null,
     landing_form: metrics.landingForm?.pattern ?? null,
     landing_form_confidence: metrics.landingForm?.confidence ?? "unavailable",
-    // No flagging logic exists yet (that's Batch 7's recommendations) —
-    // an empty list, not a guess.
-    flags: [],
+    // Batch 7: what was flagged at save time. A saved report shows these,
+    // not a recomputation, so it never changes if a cutoff is edited later.
+    flags: flagMetrics(metrics),
     // `score` deliberately omitted: the efficiency-score formula is still an
     // open decision (PRD Section 12).
   };

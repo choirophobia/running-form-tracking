@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Batches 1-6 are done (pose detection, fps gate, metric computation, Supabase schema + API,
-report UI, history sidebar — see their sections below). `src/app/page.tsx` is the real product
-page at `/`, styled per `running-brand-design-tokens.md`, now with email + password sign-in,
-"Save to history", and a left history sidebar (Batch 6). Still missing: the efficiency score and
-progress delta (PRD Section 12 open decision) and recommendations (Batch 7). Read `running-form-saas-prd-v0.md` and
+All seven batches are done (pose detection, fps gate, metric computation, Supabase schema + API,
+report UI, history sidebar, recommendations — see their sections below). `src/app/page.tsx` is the
+real product page at `/`, styled per `running-brand-design-tokens.md`, with email + password
+sign-in, "Save to history", a left history sidebar (Batch 6), and a research-cited "What to work
+on" section (Batch 7). Still missing: the efficiency score and progress delta (PRD Section 12 open
+decision). Read `running-form-saas-prd-v0.md` and
 `running-brand-design-tokens.md` in full before extending this — they are the source of truth,
 not this summary.
 
@@ -25,7 +26,8 @@ Recommended build order (from the PRD, Section 11):
    efficiency score (PRD Section 12 open decision) and no recommendations (Batch 7) yet
 6. History sidebar — **done** (see the Batch 6 section below) — cadence stands in for the
    not-yet-defined score; no progress delta yet
-7. Recommendations engine with the curated citation/video table
+7. Recommendations engine with the curated citation/video table — **done** (see the Batch 7
+   section below) — only hip drop has a research-backed cutoff so far
 
 ## Commands
 
@@ -514,6 +516,44 @@ Tests: `src/app/api/auth/auth.supabase.test.ts` (real local Supabase: sign up �
 `to-analysis-input.test.ts`. Also walked through in real Chrome (sign-up, list, saved view,
 back to live, reload persistence, mobile width, sign-out, wrong password). The "Save to history"
 click itself wasn't exercised in-browser — it needs footage with a real person in it.
+
+## Batch 7: recommendations (flags + curated citation/video table)
+
+PRD Section 7. Design + evidence record: `docs/superpowers/specs/2026-10-07-recommendations-design.md`.
+
+- **`src/data/recommendations.json` is the curated table** (PRD Section 12's static-JSON choice) —
+  one entry per metric, keyed by the `analyses` column name. A metric either has a `flag` rule
+  (`{ op, value, unit }`) plus `thresholdSource`, `flaggedMessage`, and a `recommendation` (drill,
+  rationale, citations with DOIs, optional `evidenceNote`, video), or `flag: null` plus a
+  `notJudgedReason`. Changing a cutoff, citation, or dead link is a JSON edit — no code change.
+  `src/lib/recommendations/table.ts` validates it at import time (a flagged entry with no citation
+  throws), so a bad edit fails tests/build instead of shipping.
+- **Only hip drop is flagged, at ≥ 8.4°.** This is the user's explicit "conservative flagging"
+  decision: a metric gets a flag only when a real source backs a cutoff that doesn't depend on the
+  runner's (unmeasurable) speed. 8.4° = Bramah 2019's 5.6° "aberrant" cutoff + Dingenen 2018's
+  2.7–2.8° smallest detectable difference for 2D-video pelvic drop, so a flag means "above the
+  cutoff even allowing for 2D measurement error". Caveat that the entry's `evidenceNote` states
+  openly: those studies measured 3D peak pelvic drop at midstance; ours is 2D pelvis tilt averaged
+  at footstrike — a proxy. Every other metric was researched and has no defensible cutoff (see the
+  spec's evidence table); don't add one without a checkable source.
+- `flagMetrics(metrics)` (`flag.ts`) is pure and runs in the browser on every live recompute;
+  `toAnalysisInput` saves its output to `analyses.flags` (no migration — the column already
+  existed). **Saved reports read stored flags, not a recomputation** (`knownFlags` drops unknown
+  ids), so an old report never changes if a cutoff is edited later.
+- **Rust now means "flagged", nothing else.** The old rule that colored any positive signed
+  overstride rust was removed (no research cutoff behind it — the user's call). `cardJudgement`
+  (`src/components/recommendations.tsx`) gives each card its accent and one judgement line:
+  flagged message, "Under the 8.4° research cutoff", or the not-judged reason.
+- `RecommendationsSection` ("What to work on") renders under the metric grid in both the live and
+  saved report: one entry per flag, citations linked by DOI, the "limited evidence" note, the video,
+  and the PRD's fixed medical disclaimer. With no flags it says so — and, when hip drop wasn't
+  measured (side-on video), that hip drop is the only judged metric and needs a front/rear shot.
+
+Tests: `src/lib/recommendations/recommendations.test.ts` (table shape, 8.39° vs 8.4°, null and
+extreme-but-unjudged metrics), `to-analysis-input.test.ts` (flags saved), and a flags round-trip in
+`route.supabase.test.ts`. Also checked in headless Chromium (Playwright) against seeded flagged and
+unflagged saved runs, desktop and 390px mobile. Not exercised: the live report with real footage
+that actually triggers a flag — needs a front/rear-angle clip with real hip drop.
 
 ## Product & architectural constraints (do not violate)
 

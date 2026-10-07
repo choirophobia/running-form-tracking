@@ -3,12 +3,14 @@
 import { useState } from "react";
 import { HistorySidebar } from "@/components/history/HistorySidebar";
 import { SavedReport } from "@/components/history/SavedReport";
+import { cardJudgement, RecommendationsSection } from "@/components/recommendations";
 import { MetricCard, MetricGroup, PctOfLegLength, Step } from "@/components/report";
 import { useHistory } from "@/hooks/useHistory";
 import { TIER_LABEL, useRunningFormAnalysis } from "@/hooks/useRunningFormAnalysis";
 import { useSession, type UseSessionResult } from "@/hooks/useSession";
 import { toAnalysisInput } from "@/lib/history/to-analysis-input";
 import type { MetricsResult } from "@/lib/metrics";
+import { flagMetrics, type MetricId } from "@/lib/recommendations";
 
 // Batch 5: the real report UI, styled per running-brand-design-tokens.md.
 // Runs the same pipeline as the pose-poc dev page (via
@@ -338,6 +340,10 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
   // itself when analysis completes. This component only ever mounts once
   // metrics exist, so the animation plays exactly on that reveal — no
   // hover animations, nothing animates on the upload/analyze steps above.
+  // Batch 7: flags are recomputed with every live metrics update — cheap and
+  // pure, and the same function SaveRun uses for what gets stored.
+  const flags = flagMetrics(metrics);
+  const judge = (id: MetricId, hasValue: boolean) => cardJudgement(id, flags, hasValue);
   return (
     <div className="animate-[fade-in_0.3s_ease-out]">
       <p className="mb-4 font-mono text-xs text-stone">
@@ -353,6 +359,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
       <MetricGroup label="Timing" columnsClassName="sm:grid-cols-3">
         <MetricCard
           label="Cadence"
+          {...judge("cadence", metrics.cadence != null)}
           value={metrics.cadence ? metrics.cadence.stepsPerMinute.toFixed(0) : null}
           unit="spm"
           strip={
@@ -363,6 +370,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
         />
         <MetricCard
           label="Ground contact time"
+          {...judge("ground_contact_time", metrics.groundContactTime != null)}
           value={
             metrics.groundContactTime ? metrics.groundContactTime.groundContactMs.toFixed(0) : null
           }
@@ -375,6 +383,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
         />
         <MetricCard
           label="Flight time"
+          {...judge("flight_time", metrics.flightTime != null)}
           value={metrics.flightTime ? metrics.flightTime.flightMs.toFixed(0) : null}
           unit="ms"
           note={metrics.flightTime ? `${metrics.flightTime.confidence} confidence` : undefined}
@@ -384,6 +393,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
       <MetricGroup label="Alignment & impact" columnsClassName="sm:grid-cols-2">
         <MetricCard
           label="Vertical oscillation"
+          {...judge("vertical_oscillation", metrics.verticalOscillation != null)}
           value={
             metrics.verticalOscillation ? metrics.verticalOscillation.oscillationCm.toFixed(1) : null
           }
@@ -401,9 +411,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
           label="Overstride"
           value={metrics.overstride ? Math.abs(metrics.overstride.overstrideCm).toFixed(1) : null}
           unit="cm"
-          accent={
-            metrics.overstride?.signed && metrics.overstride.overstrideCm > 0 ? "rust" : undefined
-          }
+          {...judge("overstride", metrics.overstride != null)}
           note={
             metrics.overstride ? (
               metrics.overstride.signed ? (
@@ -426,6 +434,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
         />
         <MetricCard
           label="Hip drop"
+          {...judge("hip_drop", metrics.hipDrop != null)}
           value={metrics.hipDrop ? metrics.hipDrop.hipDropDegrees.toFixed(1) : null}
           unit="°"
           note={
@@ -437,6 +446,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
         />
         <MetricCard
           label="Landing form"
+          {...judge("landing_form", metrics.landingForm != null)}
           value={metrics.landingForm ? metrics.landingForm.pattern : null}
           note={metrics.landingForm ? `${metrics.landingForm.confidence} confidence` : undefined}
         />
@@ -445,6 +455,7 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
       <MetricGroup label="Symmetry">
         <MetricCard
           label="Arm swing symmetry"
+          {...judge("arm_swing_symmetry", metrics.armSwingSymmetry != null)}
           value={metrics.armSwingSymmetry ? metrics.armSwingSymmetry.symmetryScore.toFixed(0) : null}
           unit="%"
           strip={
@@ -459,6 +470,8 @@ function MetricGrid({ metrics }: { metrics: MetricsResult }) {
           }
         />
       </MetricGroup>
+
+      <RecommendationsSection flags={flags} hipDropMeasured={metrics.hipDrop != null} />
 
       <p className="mt-6 max-w-prose text-xs text-stone">
         This is a proof of concept. These numbers have not been validated against lab equipment —

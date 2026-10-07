@@ -58,6 +58,7 @@ export function MetricCard({
   unit,
   note,
   accent,
+  judgement,
   strip,
 }: {
   label: string;
@@ -65,6 +66,10 @@ export function MetricCard({
   unit?: string;
   note?: ReactNode;
   accent?: "field" | "rust";
+  /** Batch 7: one line on whether this value is flagged, under its
+   * research cutoff, or not judged at all — see cardJudgement in
+   * src/components/recommendations.tsx. */
+  judgement?: string;
   /** Optional per-stride strip plot (see StripPlot) rendered below the
    * note — omitted entirely, not shown empty, when there's no value or
    * too few samples to plot. */
@@ -92,6 +97,9 @@ export function MetricCard({
         <p className="mt-1 font-mono text-sm text-stone">not enough data</p>
       )}
       {note && <p className="mt-1 text-xs text-stone">{note}</p>}
+      {judgement && (
+        <p className={`mt-2 text-xs ${accent === "rust" ? "text-ink" : "text-stone"}`}>{judgement}</p>
+      )}
       {value && strip}
     </div>
   );
